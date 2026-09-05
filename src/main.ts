@@ -5,6 +5,7 @@ import { resolveReviewItem, runReadinessImprovements } from "./readiness/workflo
 import { CsvCatalogSource } from "./readiness/source.js";
 import type { IngestionResult } from "./readiness/ingestCsv.js";
 import type { ImprovementRun, ReadinessAudit, ReadinessIssue, ReviewItem, MerchantData } from "./readiness/types.js";
+import { AIBuyer, CommerceClient, LlmClient } from "./buyer/agent.js";
 
 type AppState = "ONBOARDING" | "ONBOARDING_CSV" | "IMPORT_SUMMARY" | "DASHBOARD" | "COMMERCE";
 
@@ -24,6 +25,14 @@ let commerceCartId: string | null = null;
 let commerceCart: any = null;
 let commerceCheckoutResult: any = null;
 let commerceSearchQuery = "";
+
+// AI Buyer State
+let aiBuyer: AIBuyer | null = null;
+let aiBuyerMessages: Array<{ role: string; text: string; isActivity?: boolean; activityItems?: string[] }> = [];
+let aiBuyerCurrentActivity: string[] = [];
+let aiBuyerInput = "";
+let aiBuyerProcessing = false;
+let commerceView: "BUYER" | "PLAYGROUND" = "BUYER";
 
 const app = document.querySelector<HTMLElement>("#app");
 if (!app) throw new Error("Dashboard root element was not found.");
@@ -108,6 +117,16 @@ app.addEventListener("click", async (event) => {
     return;
   }
 
+  const searchInput = target.closest<HTMLInputElement>("#commerce-search");
+  if (searchInput) {
+    commerceSearchQuery = searchInput.value;
+  }
+
+  const buyerInput = target.closest<HTMLInputElement>("#buyer-input");
+  if (buyerInput) {
+    aiBuyerInput = buyerInput.value;
+  }
+
   const selectSourceBtn = target.closest<HTMLButtonElement>("button[data-source]");
   if (selectSourceBtn) {
     const source = selectSourceBtn.dataset.source;
@@ -123,6 +142,20 @@ app.addEventListener("click", async (event) => {
   const backBtn = target.closest<HTMLButtonElement>("button[data-action='back']");
   if (backBtn) {
     currentState = "ONBOARDING";
+    render();
+    return;
+  }
+
+  const tabBuyerBtn = target.closest<HTMLButtonElement>("button[data-commerce-tab='buyer']");
+  if (tabBuyerBtn) {
+    commerceView = "BUYER";
+    render();
+    return;
+  }
+
+  const tabPlaygroundBtn = target.closest<HTMLButtonElement>("button[data-commerce-tab='playground']");
+  if (tabPlaygroundBtn) {
+    commerceView = "PLAYGROUND";
     render();
     return;
   }
@@ -200,9 +233,68 @@ async function loadCommerceState() {
     } else {
       commerceCart = await commerceApi(`/carts/${commerceCartId}`);
     }
+
+    if (!aiBuyer) {
+      const llmClient: LlmClient = {
+        generate: async (payload: any) => {
+          const res = await fetch("/api/buyer/llm", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+          });
+          if (!res.ok) throw new Error(await res.text());
+          return res.json();
+        }
+      };
+
+      const commerceClient: CommerceClient = {
+        searchProducts: async (query?: string) => {
+          return commerceApi(`/products${query ? `?query=${encodeURIComponent(query)}` : ""}`);
+        },
+        getProduct: async (productId: string) => {
+          return commerceApi(`/products/${productId}`);
+        },
+        checkInventory: async (variantId: string, quantity: number) => {
+          return commerceApi(`/inventory/${variantId}?quantity=${quantity}`);
+        },
+        createCart: async () => {
+          const res = await commerceApi("/carts", { method: "POST" });
+          commerceCartId = res.id;
+          commerceCart = res;
+          return res;
+        },
+        addToCart: async (cartId: string, productId: string, variantId: string | null, quantity: number) => {
+          await commerceApi(`/carts/${cartId}/items`, {
+            method: "POST",
+            body: JSON.stringify({ productId, variantId, quantity })
+          });
+          commerceCart = await commerceApi(`/carts/${cartId}`);
+          return { success: true, cart: commerceCart };
+        },
+        getCart: async (cartId: string) => {
+          return commerceApi(`/carts/${cartId}`);
+        },
+        checkout: async (cartId: string) => {
+          commerceCheckoutResult = await commerceApi("/checkout", {
+            method: "POST",
+            body: JSON.stringify({ cartId })
+          });
+          if (commerceCheckoutResult.status === "ALLOW" && commerceCheckoutResult.razorpayOrderId) {
+            initiateRazorpay(commerceCheckoutResult);
+          }
+          return commerceCheckoutResult;
+        }
+      };
+
+      aiBuyer = new AIBuyer(commerceClient, llmClient, (activity) => {
+        aiBuyerCurrentActivity.push(activity);
+        render();
+      });
+    }
     render();
-  } catch (e) {
+  } catch (e: any) {
     console.error("Failed to load commerce state", e);
+    alert("Failed to load commerce state: " + e.message);
   }
 }
 
@@ -307,7 +399,48 @@ app.addEventListener("click", async (event) => {
     }
     return;
   }
+
+  const buyerSubmitBtn = target.closest<HTMLButtonElement>("button[data-commerce-action='buyer-submit']");
+  if (buyerSubmitBtn && aiBuyerInput.trim() && aiBuyer) {
+    await sendBuyerMessage();
+    return;
+  }
 });
+
+async function sendBuyerMessage() {
+  if (!aiBuyerInput.trim() || !aiBuyer || aiBuyerProcessing) return;
+  const message = aiBuyerInput.trim();
+  aiBuyerInput = "";
+  aiBuyerProcessing = true;
+  aiBuyerCurrentActivity = [];
+
+  // Push user message to chat log
+  aiBuyerMessages.push({ role: "user", text: message });
+  render();
+
+  // Scroll to bottom after render
+  setTimeout(() => {
+    const log = document.getElementById("buyer-chat-log");
+    if (log) log.scrollTop = log.scrollHeight;
+  }, 50);
+
+  try {
+    const reply = await aiBuyer.chat(message);
+    // Push AI reply with accumulated activity items
+    aiBuyerMessages.push({ role: "assistant", text: reply, isActivity: aiBuyerCurrentActivity.length > 0, activityItems: [...aiBuyerCurrentActivity] });
+  } catch (e: any) {
+    aiBuyerMessages.push({ role: "assistant", text: `Sorry, I ran into an error: ${e.message}` });
+  } finally {
+    aiBuyerProcessing = false;
+    aiBuyerCurrentActivity = [];
+    render();
+    setTimeout(() => {
+      const log = document.getElementById("buyer-chat-log");
+      if (log) log.scrollTop = log.scrollHeight;
+      document.getElementById("buyer-input")?.focus();
+    }, 50);
+  }
+}
 
 app.addEventListener("input", async (event) => {
   const target = event.target as Element;
@@ -318,6 +451,19 @@ app.addEventListener("input", async (event) => {
       render();
     } catch (e) {
       console.error(e);
+    }
+  }
+  if (target.id === "buyer-input") {
+    aiBuyerInput = (target as HTMLInputElement).value;
+  }
+});
+
+app.addEventListener("keydown", async (event) => {
+  if ((event as KeyboardEvent).key === "Enter") {
+    const target = event.target as Element;
+    if (target.id === "buyer-input") {
+      event.preventDefault();
+      await sendBuyerMessage();
     }
   }
 });
@@ -566,9 +712,9 @@ function renderInitialAudit(audit: ReadinessAudit): string {
 function renderWorkflow(run: ImprovementRun): string {
   const reviewRequired = run.reviewItems.filter((item) => item.status === "REVIEW_REQUIRED").length;
   return `<section class="workflow-metrics" aria-label="Improvement outcome">
-    <article class="outcome outcome-auto"><strong>✓ ${run.changes.filter((change) => change.status === "AUTO_APPLIED").length} automatically fixed</strong><span>High-confidence proposals passed deterministic validation.</span></article>
-    <article class="outcome outcome-review"><strong>⚠ ${reviewRequired} merchant decisions required</strong><span>Sensitive or ambiguous values were not invented.</span></article>
-    <article class="outcome outcome-blocked"><strong>✗ ${run.afterAudit.issueCount - reviewRequired} unresolved / blocking</strong><span>Issues remain until a valid merchant value is supplied.</span></article>
+    <article class="outcome outcome-auto"><strong> ${run.changes.filter((change) => change.status === "AUTO_APPLIED").length} automatically fixed</strong><span>High-confidence proposals passed deterministic validation.</span></article>
+    <article class="outcome outcome-review"><strong>${reviewRequired} merchant decisions required</strong><span>Sensitive or ambiguous values were not invented.</span></article>
+    <article class="outcome outcome-blocked"><strong>${run.afterAudit.issueCount - reviewRequired} unresolved / blocking</strong><span>Issues remain until a valid merchant value is supplied.</span></article>
   </section>
   <section class="panel"><div class="panel-heading"><div><p class="eyebrow">AI corrections</p><h2>Applied change log</h2></div><p class="panel-note">Every automatic write has a before value, after value, reason, confidence, timestamp, and rollback-ready record.</p></div>${renderChanges(run)}</section>
   <section class="panel"><div class="panel-heading"><div><p class="eyebrow">Merchant review queue</p><h2>Decisions the agent cannot make</h2></div><p class="panel-note">Policy and commercial decisions require explicit merchant input. The agent never chooses their value.</p></div>${renderReviewQueue(run.reviewItems)}</section>
@@ -577,12 +723,12 @@ function renderWorkflow(run: ImprovementRun): string {
 
 function renderChanges(run: ImprovementRun): string {
   if (!run.changes.length) return '<p class="empty-state">No safe corrections were applied.</p>';
-  return `<div class="change-list">${run.changes.map((change) => `<article class="change-row"><span class="status-badge status-${change.status.toLowerCase()}">${change.status === "AUTO_APPLIED" ? "✓ Automatically fixed" : "Merchant applied"}</span><div><strong>${escapeHtml(change.entity.name)} · <code>${escapeHtml(change.field)}</code></strong><p><span class="value-before">${escapeHtml(formatValue(change.beforeValue))}</span> → <span class="value-after">${escapeHtml(formatValue(change.afterValue))}</span></p><small>${escapeHtml(change.reason)} · ${(change.confidence * 100).toFixed(0)}% confidence · ${escapeHtml(change.timestamp)}</small></div></article>`).join("")}</div>`;
+  return `<div class="change-list">${run.changes.map((change) => `<article class="change-row"><span class="status-badge status-${change.status.toLowerCase()}">${change.status === "AUTO_APPLIED" ? "Automatically fixed" : "Merchant applied"}</span><div><strong>${escapeHtml(change.entity.name)} · <code>${escapeHtml(change.field)}</code></strong><p><span class="value-before">${escapeHtml(formatValue(change.beforeValue))}</span> → <span class="value-after">${escapeHtml(formatValue(change.afterValue))}</span></p><small>${escapeHtml(change.reason)} · ${(change.confidence * 100).toFixed(0)}% confidence · ${escapeHtml(change.timestamp)}</small></div></article>`).join("")}</div>`;
 }
 
 function renderReviewQueue(items: ReviewItem[]): string {
   if (!items.length) return '<p class="empty-state">No merchant decisions are currently required.</p>';
-  return `<div class="review-list">${items.map((item) => `<article class="review-card ${item.status === "RESOLVED" ? "review-resolved" : ""}"><div><span class="status-badge status-review">${item.status === "RESOLVED" ? "✓ Resolved by merchant" : "⚠ Review required"}</span><h3>${escapeHtml(item.issue.message)}</h3><p><code>${escapeHtml(item.issue.affectedField)}</code> · Current value: <strong>${escapeHtml(formatValue(item.currentValue))}</strong></p><p>${escapeHtml(item.reason)}</p><small>AI proposed: ${escapeHtml(formatValue(item.proposedValue))} · Confidence: ${(item.confidence * 100).toFixed(0)}%</small></div>${item.status === "REVIEW_REQUIRED" ? renderReviewForm(item) : ""}</article>`).join("")}</div>`;
+  return `<div class="review-list">${items.map((item) => `<article class="review-card ${item.status === "RESOLVED" ? "review-resolved" : ""}"><div><span class="status-badge status-review">${item.status === "RESOLVED" ? "Resolved by merchant" : "Review required"}</span><h3>${escapeHtml(item.issue.message)}</h3><p><code>${escapeHtml(item.issue.affectedField)}</code> · Current value: <strong>${escapeHtml(formatValue(item.currentValue))}</strong></p><p>${escapeHtml(item.reason)}</p><small>AI proposed: ${escapeHtml(formatValue(item.proposedValue))} · Confidence: ${(item.confidence * 100).toFixed(0)}%</small></div>${item.status === "REVIEW_REQUIRED" ? renderReviewForm(item) : ""}</article>`).join("")}</div>`;
 }
 
 function renderReviewForm(item: ReviewItem): string {
@@ -686,44 +832,181 @@ function renderCommercePlayground(): string {
         <small>${escapeHtml(commerceCheckoutResult.code || "")}</small>
         ${commerceCheckoutResult.status === "REQUIRE_APPROVAL" ? `
         <div style="margin-top: 12px;">
-          <button class="primary-button" style="width: 100%; justify-content: center; background: #e04f16; border-color: #e04f16;" data-commerce-action="checkout-approve">Manually Approve & Checkout</button>
+          <button class="primary-button" style="width: 100%; justify-content: center; background: #e04f16; border-color: #e04f16;" data-commerce-action="checkout-approve">Manually Approve &amp; Checkout</button>
         </div>` : ""}
       </div>
     `;
   }
 
-  return `
-    <div style="display: grid; grid-template-columns: 2fr 1fr; gap: 24px; padding: 24px;">
-      <section class="panel">
-        <div class="panel-heading">
-          <div>
-            <p class="eyebrow">Commerce API</p>
-            <h2>Products Search</h2>
-          </div>
-        </div>
-        <div style="padding: 16px;">
-          <input type="text" id="commerce-search" placeholder="Search products..." value="${escapeHtml(commerceSearchQuery)}" style="width: 100%; padding: 10px; border-radius: 8px; border: 1px solid #d0d5dd; margin-bottom: 16px; font: inherit;" />
-          <div class="source-cards" style="grid-template-columns: 1fr 1fr; gap: 16px;">
-            ${productsHtml || "<p>No products found.</p>"}
-          </div>
-        </div>
-      </section>
+  // Tab nav
+  const tabNav = `
+    <div style="display:flex; gap: 8px; padding: 16px 24px 0; border-bottom: 1px solid #eaecf0; margin-bottom: 0; background: #fff;">
+      <button data-commerce-tab="buyer" style="padding: 10px 20px; border-radius: 8px 8px 0 0; border: 1px solid ${commerceView === 'BUYER' ? '#5d5fef' : '#d0d5dd'}; border-bottom: none; background: ${commerceView === 'BUYER' ? '#f4f3ff' : '#fff'}; color: ${commerceView === 'BUYER' ? '#5d5fef' : '#344054'}; font-weight: ${commerceView === 'BUYER' ? '700' : '500'}; cursor: pointer; font-size: 0.875rem;">
+        AI Buyer
+      </button>
+      <button data-commerce-tab="playground" style="padding: 10px 20px; border-radius: 8px 8px 0 0; border: 1px solid ${commerceView === 'PLAYGROUND' ? '#5d5fef' : '#d0d5dd'}; border-bottom: none; background: ${commerceView === 'PLAYGROUND' ? '#f4f3ff' : '#fff'}; color: ${commerceView === 'PLAYGROUND' ? '#5d5fef' : '#344054'}; font-weight: ${commerceView === 'PLAYGROUND' ? '700' : '500'}; cursor: pointer; font-size: 0.875rem;">
+        Commerce Playground
+      </button>
+    </div>
+  `;
 
-      <section class="panel">
-        <div class="panel-heading">
-          <div>
-            <p class="eyebrow">Server-side Cart</p>
-            <h2>Current Cart</h2>
+  if (commerceView === "PLAYGROUND") {
+    return `
+      ${tabNav}
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 24px; padding: 24px;">
+        <section class="panel">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">Commerce API</p>
+              <h2>Products Search</h2>
+            </div>
+          </div>
+          <div style="padding: 16px;">
+            <input type="text" id="commerce-search" placeholder="Search products..." value="${escapeHtml(commerceSearchQuery)}" style="width: 100%; padding: 10px; border-radius: 8px; border: 1px solid #d0d5dd; margin-bottom: 16px; font: inherit;" />
+            <div class="source-cards" style="grid-template-columns: 1fr; gap: 16px;">
+              ${productsHtml || "<p>No products found.</p>"}
+            </div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">Server-side Cart</p>
+              <h2>Current Cart</h2>
+            </div>
+          </div>
+          <div style="padding: 16px;">
+            ${cartHtml}
+            <div style="margin-top: 24px;">
+              <button class="primary-button" style="width: 100%; justify-content: center;" data-commerce-action="checkout" ${!commerceCart || !commerceCart.items || commerceCart.items.length === 0 ? "disabled" : ""}>Checkout Server Cart</button>
+            </div>
+            ${checkoutHtml}
+          </div>
+        </section>
+      </div>
+    `;
+  }
+
+  // ── BUYER VIEW ────────────────────────────────────────────────────────────
+  const renderBubble = (msg: { role: string; text: string; activityItems?: string[] }) => {
+    const isUser = msg.role === "user";
+    const avatarSvg = isUser
+      ? `<div style="width:36px;height:36px;border-radius:50%;background:linear-gradient(135deg,#5d5fef,#a78bfa);display:flex;align-items:center;justify-content:center;color:#fff;font-size:14px;flex-shrink:0;"></div>`
+      : `<div style="width:36px;height:36px;border-radius:50%;background:linear-gradient(135deg,#0ea5e9,#6366f1);display:flex;align-items:center;justify-content:center;color:#fff;font-size:14px;flex-shrink:0;"></div>`;
+
+    const activityChips = msg.activityItems && msg.activityItems.length > 0
+      ? `<div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:8px;">
+          ${msg.activityItems.map(a => `<span style="font-size:11px;padding:2px 8px;border-radius:999px;background:#f0f9ff;color:#0369a1;border:1px solid #bae6fd;font-family:monospace;">${escapeHtml(a)}</span>`).join("")}
+        </div>`
+      : "";
+
+    // Convert newlines to <br> for readability
+    const formattedText = escapeHtml(msg.text).replace(/\n/g, "<br>");
+
+    return `
+      <div style="display:flex;gap:12px;align-items:flex-start;margin-bottom:20px;${isUser ? 'flex-direction:row-reverse;' : ''}">
+        ${avatarSvg}
+        <div style="max-width:72%;display:flex;flex-direction:column;${isUser ? 'align-items:flex-end;' : ''}">
+          <span style="font-size:11px;color:#9ca3af;margin-bottom:4px;font-weight:500;">${isUser ? "You" : "AI Buyer"}</span>
+          ${activityChips}
+          <div style="padding:12px 16px;border-radius:${isUser ? '16px 4px 16px 16px' : '4px 16px 16px 16px'};background:${isUser ? 'linear-gradient(135deg,#5d5fef,#6366f1)' : '#f9fafb'};color:${isUser ? '#fff' : '#1d2939'};border:${isUser ? 'none' : '1px solid #eaecf0'};font-size:0.9rem;line-height:1.6;box-shadow:0 1px 3px rgba(0,0,0,0.05);">
+            ${formattedText}
           </div>
         </div>
-        <div style="padding: 16px;">
-          ${cartHtml}
-          <div style="margin-top: 24px;">
-            <button class="primary-button" style="width: 100%; justify-content: center;" data-commerce-action="checkout" ${!commerceCart || !commerceCart.items || commerceCart.items.length === 0 ? "disabled" : ""}>Checkout Server Cart</button>
-          </div>
-          ${checkoutHtml}
+      </div>
+    `;
+  };
+
+  const emptyState = aiBuyerMessages.length === 0 ? `
+    <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;gap:16px;color:#9ca3af;">
+      <div style="width:64px;height:64px;border-radius:50%;background:linear-gradient(135deg,#0ea5e9,#6366f1);display:flex;align-items:center;justify-content:center;font-size:28px;"></div>
+      <div style="text-align:center;">
+        <p style="font-weight:600;color:#374151;margin:0 0 4px;">AI Buyer ready</p>
+        <p style="font-size:0.85rem;margin:0;max-width:320px;">Tell me what you're looking for and I'll search the catalog, check inventory, and help you checkout.</p>
+      </div>
+      <div style="display:flex;flex-wrap:wrap;gap:8px;justify-content:center;max-width:480px;">
+        ${["Find me running shoes", "What's in stock?", "Add a t-shirt to cart", "Show me all products"].map(s =>
+          `<button style="padding:6px 14px;border-radius:999px;border:1px solid #d1d5db;background:#fff;color:#374151;font-size:0.8rem;cursor:pointer;transition:all .15s;" onclick="document.getElementById('buyer-input').value='${s}'; document.getElementById('buyer-input').dispatchEvent(new Event('input')); document.getElementById('buyer-input').focus();">${s}</button>`
+        ).join("")}
+      </div>
+    </div>
+  ` : "";
+
+  const thinkingBubble = aiBuyerProcessing ? `
+    <div style="display:flex;gap:12px;align-items:flex-start;margin-bottom:20px;">
+      <div style="width:36px;height:36px;border-radius:50%;background:linear-gradient(135deg,#0ea5e9,#6366f1);display:flex;align-items:center;justify-content:center;color:#fff;font-size:14px;flex-shrink:0;"></div>
+      <div style="display:flex;flex-direction:column;">
+        <span style="font-size:11px;color:#9ca3af;margin-bottom:4px;font-weight:500;">AI Buyer</span>
+        ${aiBuyerCurrentActivity.length > 0 ? `<div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:8px;">${aiBuyerCurrentActivity.map(a => `<span style="font-size:11px;padding:2px 8px;border-radius:999px;background:#f0f9ff;color:#0369a1;border:1px solid #bae6fd;font-family:monospace;animation:pulse 1.5s infinite;">${escapeHtml(a)}</span>`).join("")}</div>` : ""}
+        <div style="padding:12px 16px;border-radius:4px 16px 16px 16px;background:#f9fafb;border:1px solid #eaecf0;display:flex;gap:4px;align-items:center;">
+          <span style="width:7px;height:7px;border-radius:50%;background:#9ca3af;animation:bounce 1.2s infinite 0s;display:inline-block;"></span>
+          <span style="width:7px;height:7px;border-radius:50%;background:#9ca3af;animation:bounce 1.2s infinite 0.2s;display:inline-block;"></span>
+          <span style="width:7px;height:7px;border-radius:50%;background:#9ca3af;animation:bounce 1.2s infinite 0.4s;display:inline-block;"></span>
         </div>
-      </section>
+      </div>
+    </div>
+  ` : "";
+
+  const messagesHtml = aiBuyerMessages.map(renderBubble).join("") + thinkingBubble;
+
+  return `
+    <style>
+      @keyframes bounce {
+        0%,80%,100% { transform: translateY(0); opacity:.4; }
+        40% { transform: translateY(-6px); opacity:1; }
+      }
+      @keyframes pulse {
+        0%,100% { opacity:1; }
+        50% { opacity:.5; }
+      }
+      #buyer-input:focus { outline: none; border-color: #5d5fef; box-shadow: 0 0 0 3px rgba(93,95,239,0.12); }
+    </style>
+    ${tabNav}
+    <div style="display:flex;flex-direction:column;height:calc(100vh - 220px);background:#fff;">
+      <!-- Chat log -->
+      <div id="buyer-chat-log" style="flex:1;overflow-y:auto;padding:32px 40px;display:flex;flex-direction:column;gap:0;">
+        ${emptyState}
+        ${messagesHtml}
+      </div>
+
+      <!-- Cart summary strip (live) -->
+      ${commerceCart && commerceCart.items && commerceCart.items.length > 0 ? `
+      <div style="padding:10px 40px;border-top:1px solid #eaecf0;background:#fafbff;display:flex;align-items:center;gap:12px;font-size:0.85rem;color:#374151;">
+        <span style="font-weight:600;">Cart:</span>
+        ${commerceCart.items.map((it: any) => `<span style="padding:3px 10px;border-radius:999px;background:#ede9fe;color:#5b21b6;font-size:12px;">${escapeHtml(it.productId)} × ${it.quantity}</span>`).join("")}
+        <span style="margin-left:auto;color:#6366f1;font-weight:700;">Total: ${commerceCart.total !== undefined ? `₹${commerceCart.total}` : "—"}</span>
+      </div>` : ""}
+
+      <!-- Checkout result strip -->
+      ${commerceCheckoutResult ? `
+      <div style="padding:10px 40px;border-top:1px solid #eaecf0;background:${commerceCheckoutResult.status === 'ALLOW' ? '#ecfdf3' : commerceCheckoutResult.status === 'DENY' ? '#fef3f2' : '#fffaeb'};display:flex;align-items:center;gap:10px;font-size:0.85rem;">
+        <span style="font-weight:700;color:${commerceCheckoutResult.status === 'ALLOW' ? '#027a48' : commerceCheckoutResult.status === 'DENY' ? '#b42318' : '#b54708'};">${commerceCheckoutResult.status}</span>
+        <span style="color:#374151;">${escapeHtml(commerceCheckoutResult.reason || "")}</span>
+        ${commerceCheckoutResult.status === "REQUIRE_APPROVAL" ? `<button class="primary-button" style="margin-left:auto;background:#e04f16;border-color:#e04f16;padding:6px 16px;" data-commerce-action="checkout-approve">Manually Approve</button>` : ""}
+      </div>` : ""}
+
+      <!-- Input bar -->
+      <div style="padding:16px 40px 24px;border-top:1px solid #eaecf0;background:#fff;display:flex;gap:12px;align-items:flex-end;">
+        <div style="flex:1;position:relative;">
+          <input
+            type="text"
+            id="buyer-input"
+            placeholder="Ask the AI Buyer to search, add to cart, or checkout…"
+            value="${escapeHtml(aiBuyerInput)}"
+            ${aiBuyerProcessing ? "disabled" : ""}
+            style="width:100%;padding:14px 18px;border-radius:12px;border:1.5px solid #d0d5dd;font-size:0.95rem;font-family:inherit;background:${aiBuyerProcessing ? '#f9fafb' : '#fff'};color:#101828;box-sizing:border-box;transition:border-color .2s;"
+          />
+        </div>
+        <button
+          class="primary-button"
+          data-commerce-action="buyer-submit"
+          ${aiBuyerProcessing || !aiBuyerInput.trim() ? "disabled" : ""}
+          style="padding:14px 24px;border-radius:12px;font-size:0.95rem;flex-shrink:0;transition:all .2s;${aiBuyerProcessing ? 'opacity:.6;cursor:not-allowed;' : ''}"
+        >
+          ${aiBuyerProcessing ? "⏳" : "Send ↵"}
+        </button>
+      </div>
     </div>
   `;
 }

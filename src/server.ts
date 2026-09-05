@@ -165,6 +165,46 @@ async function handleGeminiApi(payload: any): Promise<any> {
   });
 }
 
+async function handleGeminiProxy(payload: any): Promise<any> {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    throw new Error("GEMINI_API_KEY is missing");
+  }
+
+  const requestBody = JSON.stringify(payload);
+
+  return new Promise((resolve, reject) => {
+    const req = httpsRequest(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent?key=${apiKey}`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Content-Length": Buffer.byteLength(requestBody)
+        }
+      },
+      (res) => {
+        let body = "";
+        res.on("data", (chunk: any) => body += chunk);
+        res.on("end", () => {
+          if (res.statusCode && res.statusCode >= 400) {
+            reject(new Error(`Gemini API Error ${res.statusCode}: ${body}`));
+            return;
+          }
+          try {
+            resolve(JSON.parse(body));
+          } catch (e) {
+            reject(e);
+          }
+        });
+      }
+    );
+    req.on("error", reject);
+    req.write(requestBody);
+    req.end();
+  });
+}
+
 // Commerce imports
 import { publishMerchant } from "./commerce/store.js";
 import { searchProducts, getProduct, checkInventory, createCart, addToCart, removeFromCart, getCart, checkout } from "./commerce/service.js";
@@ -195,6 +235,20 @@ const server = createServer(async (req, res) => {
     return;
   }
   
+  if (req.method === "POST" && parsedUrl.pathname === "/api/buyer/llm") {
+    try {
+      const body = await parseBody(req);
+      const response = await handleGeminiProxy(body);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(response));
+    } catch (err: any) {
+      console.error("[API Error]", err.message);
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: err.message }));
+    }
+    return;
+  }
+
   if (req.method === "GET" && parsedUrl.pathname === "/api/ai/status") {
     const provider = process.env.PROPOSAL_PROVIDER === "llm" ? "llm" : "deterministic";
     const hasKey = !!process.env.GEMINI_API_KEY;
