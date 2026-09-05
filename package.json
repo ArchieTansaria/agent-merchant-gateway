@@ -7,9 +7,10 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "npm run build && node --experimental-strip-types --test test/*.test.ts",
-    "start": "python3 -m http.server 4173"
+    "start": "npm run build && node dist/server.js"
   },
   "devDependencies": {
+    "@types/node": "^26.4.1",
     "typescript": "^5.7.3"
   }
 }

@@ -9,19 +9,42 @@ const initialAudit = auditMerchant(sourceMerchant);
 const app = document.querySelector<HTMLElement>("#app");
 let improvementRun: ImprovementRun | null = null;
 let isProcessing = false;
+let progressState = "";
+let aiProvider = "Loading provider...";
 
 if (!app) throw new Error("Dashboard root element was not found.");
 
-app.addEventListener("click", (event) => {
+fetch("/api/ai/status")
+  .then(res => res.json())
+  .then(data => {
+    aiProvider = data.provider === "llm" && data.hasKey ? "Gemini" : "Deterministic Demo Provider";
+    render();
+  })
+  .catch(() => {
+    aiProvider = "Deterministic Demo Provider";
+    render();
+  });
+
+app.addEventListener("click", async (event) => {
   const button = (event.target as Element).closest<HTMLButtonElement>("button[data-action='run-improvements']");
   if (!button || isProcessing || improvementRun) return;
   isProcessing = true;
+  progressState = "STARTING";
   render();
-  window.setTimeout(() => {
-    improvementRun = runReadinessImprovements(sourceMerchant);
+  
+  try {
+    improvementRun = await runReadinessImprovements(sourceMerchant, (state) => {
+      progressState = state;
+      render();
+    });
+  } catch (err) {
+    console.error(err);
+    alert("An error occurred running improvements");
+  } finally {
     isProcessing = false;
+    progressState = "COMPLETE";
     render();
-  }, 550);
+  }
 });
 
 app.addEventListener("submit", (event) => {
@@ -41,6 +64,7 @@ function render(): void {
       <p class="eyebrow">AI Commerce Readiness Agent</p>
       <h1>${escapeHtml(currentAudit.merchantName)}</h1>
       <p class="subtitle">Audit → proposal → deterministic validation → safe application → merchant review</p>
+      <div class="provider-badge">AI Provider: ${escapeHtml(aiProvider)}</div>
     </header>
     ${renderFlow(currentAudit)}
     ${renderScores(currentAudit, improvementRun?.beforeAudit)}
@@ -50,9 +74,10 @@ function render(): void {
 
 function renderFlow(audit: ReadinessAudit): string {
   const state = isProcessing ? "processing" : improvementRun ? "complete" : "idle";
+  const btnText = isProcessing ? progressState : improvementRun ? "AI Improvements Applied" : "Run AI Improvements";
   return `<section class="flow-strip state-${state}" aria-label="Readiness workflow">
     <span>1. Audit</span><span>2. AI proposals</span><span>3. Safety validation</span><span>4. Apply safe changes</span><span>5. Merchant review</span><span>6. Re-audit</span>
-    <button class="primary-button" data-action="run-improvements" ${state === "idle" ? "" : "disabled"}>${isProcessing ? "Running AI Improvements…" : improvementRun ? "AI Improvements Applied" : "Run AI Improvements"}</button>
+    <button class="primary-button" data-action="run-improvements" ${state === "idle" ? "" : "disabled"}>${escapeHtml(btnText)}</button>
     <span class="flow-score">Current: ${audit.overallScore}/100</span>
   </section>`;
 }

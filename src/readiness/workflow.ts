@@ -13,10 +13,13 @@ import type {
 } from "./types.js";
 
 /** Runs audit → proposal → validation → safe application → re-audit on clones only. */
-export function runReadinessImprovements(source: MerchantData): ImprovementRun {
+export async function runReadinessImprovements(source: MerchantData, onProgress?: (state: string) => void): Promise<ImprovementRun> {
   const sourceMerchant = ingestMerchant(source);
   const beforeAudit = auditMerchant(sourceMerchant);
-  const proposals = proposeCorrections(sourceMerchant, beforeAudit);
+  
+  const proposals = await proposeCorrections(sourceMerchant, beforeAudit, onProgress);
+  
+  onProgress?.("SAFETY VALIDATION");
   const validations = proposals.map((proposal) =>
     validateCorrectionProposal(sourceMerchant, beforeAudit, proposal),
   );

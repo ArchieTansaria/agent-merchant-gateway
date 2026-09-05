@@ -11,14 +11,97 @@ const COLOR_BY_SKU_TOKEN: Record<string, string> = {
   BLU: "blue",
 };
 
+let globalProviderConfig: { provider: string, hasKey: boolean } | null = null;
+
+export function __resetProviderConfigForTesting() {
+  globalProviderConfig = null;
+}
+
+async function checkProvider(): Promise<{ provider: string, hasKey: boolean }> {
+  if (globalProviderConfig) return globalProviderConfig;
+  try {
+    const res = await fetch("/api/ai/status");
+    if (!res.ok) throw new Error("Status API failed");
+    globalProviderConfig = await res.json();
+  } catch (err) {
+    // Fallback if no server or during tests
+    globalProviderConfig = { provider: "deterministic", hasKey: false };
+  }
+  return globalProviderConfig!;
+}
+
 /**
  * This is the replaceable AI boundary. It produces proposals only; it never
  * mutates merchant data and a deterministic validator decides what is safe.
  */
-export function proposeCorrections(
+export async function proposeCorrections(
   merchant: MerchantData,
   audit: ReadinessAudit,
-): CorrectionProposal[] {
+  onProgress?: (state: string) => void
+): Promise<CorrectionProposal[]> {
+  const config = await checkProvider();
+  
+  if (config.provider === "llm") {
+    if (!config.hasKey) {
+      console.warn("LLM provider selected but GEMINI_API_KEY is missing. Failing gracefully to deterministic provider.");
+      return audit.issues.map((issue) => proposeForIssue(merchant, issue));
+    }
+    
+    const proposals: CorrectionProposal[] = [];
+    for (const issue of audit.issues) {
+      onProgress?.("AI ANALYZING");
+      
+      const relevantEntity = merchant.products.find(p => p.id === issue.affectedEntity.id) || 
+                             merchant.inventory.find(i => i.id === issue.affectedEntity.id) ||
+                             merchant.policies;
+      
+      const payload = {
+        issue,
+        relevantEntity,
+        relevantContext: `The deterministic validator handles applying safe semantic normalization, but never invent pricing or policies.
+Canonical categories are: ${CANONICAL_CATEGORIES.join(", ")}.
+If resolving a CATEGORY_NOT_CANONICAL issue by matching a canonical category, set action to AUTO_APPLY and correctionType to NORMALIZE_CATEGORY.
+If extracting a missing size from variants, set action to AUTO_APPLY and correctionType to EXTRACT_ATTRIBUTE_FROM_VARIANTS.
+If extracting a missing variant option (like color) from a SKU, set action to AUTO_APPLY and correctionType to EXTRACT_ATTRIBUTE_FROM_SKU.
+For other ambiguous changes, use REVIEW_REQUIRED.`
+      };
+      
+      try {
+        const res = await fetch("/api/ai/proposals", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+        if (!res.ok) throw new Error(`API error ${res.status}`);
+        
+        onProgress?.("PROPOSAL GENERATED");
+        const proposal = await res.json();
+        
+        // Basic shape validation to protect downstream validator
+        if (!proposal || typeof proposal !== "object" || !proposal.issueId || !proposal.action) {
+          throw new Error("Malformed LLM response");
+        }
+        proposals.push(proposal as CorrectionProposal);
+      } catch (err) {
+        console.error("LLM failed for issue:", issue.id, err);
+        // Fallback to safe reject proposal
+        proposals.push({
+          issueId: issue.id,
+          entityId: issue.affectedEntity.id,
+          field: issue.affectedField,
+          currentValue: readIssueValue(merchant, issue),
+          proposedValue: null,
+          reason: "LLM API failed",
+          confidence: 0,
+          action: "REJECT",
+          correctionType: "LLM_ERROR"
+        });
+      }
+    }
+    return proposals;
+  }
+
+  // Deterministic Fallback
   return audit.issues.map((issue) => proposeForIssue(merchant, issue));
 }
 
