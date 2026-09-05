@@ -75,6 +75,8 @@ export const demoMerchant: MerchantData = {
     },
   ],
   policies: {
+    currency: "USD",
+    maxQuantityPerItem: 5,
     returnPolicy: {
       windowDays: 30,
       summary: "Unused products can be returned in their original condition.",

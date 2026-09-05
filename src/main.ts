@@ -2,16 +2,21 @@ import { demoMerchant } from "./data/demoMerchant.js";
 import { auditMerchant } from "./readiness/audit.js";
 import { ingestMerchant } from "./readiness/ingest.js";
 import { resolveReviewItem, runReadinessImprovements } from "./readiness/workflow.js";
-import type { ImprovementRun, ReadinessAudit, ReadinessIssue, ReviewItem } from "./readiness/types.js";
+import { ingestCsv, IngestionResult } from "./readiness/ingestCsv.js";
+import type { ImprovementRun, ReadinessAudit, ReadinessIssue, ReviewItem, MerchantData } from "./readiness/types.js";
 
-const sourceMerchant = ingestMerchant(demoMerchant);
-const initialAudit = auditMerchant(sourceMerchant);
-const app = document.querySelector<HTMLElement>("#app");
+type AppState = "ONBOARDING" | "IMPORT_SUMMARY" | "DASHBOARD";
+
+let currentState: AppState = "ONBOARDING";
+let sourceMerchant: MerchantData | null = null;
+let initialAudit: ReadinessAudit | null = null;
 let improvementRun: ImprovementRun | null = null;
 let isProcessing = false;
 let progressState = "";
 let aiProvider = "Loading provider...";
+let ingestionResult: IngestionResult | null = null;
 
+const app = document.querySelector<HTMLElement>("#app");
 if (!app) throw new Error("Dashboard root element was not found.");
 
 fetch("/api/ai/status")
@@ -26,46 +31,209 @@ fetch("/api/ai/status")
   });
 
 app.addEventListener("click", async (event) => {
-  const button = (event.target as Element).closest<HTMLButtonElement>("button[data-action='run-improvements']");
-  if (!button || isProcessing || improvementRun) return;
-  isProcessing = true;
-  progressState = "STARTING";
-  render();
-  
-  try {
-    improvementRun = await runReadinessImprovements(sourceMerchant, (state) => {
-      progressState = state;
-      render();
-    });
-  } catch (err) {
-    console.error(err);
-    alert("An error occurred running improvements");
-  } finally {
-    isProcessing = false;
-    progressState = "COMPLETE";
+  const target = event.target as Element;
+
+  const demoBtn = target.closest<HTMLButtonElement>("button[data-action='use-demo']");
+  if (demoBtn) {
+    sourceMerchant = ingestMerchant(demoMerchant);
+    initialAudit = auditMerchant(sourceMerchant);
+    currentState = "DASHBOARD";
     render();
+    return;
+  }
+
+  const runAuditBtn = target.closest<HTMLButtonElement>("button[data-action='run-audit']");
+  if (runAuditBtn) {
+    initialAudit = auditMerchant(sourceMerchant!);
+    currentState = "DASHBOARD";
+    render();
+    return;
+  }
+
+  const runImprovBtn = target.closest<HTMLButtonElement>("button[data-action='run-improvements']");
+  if (runImprovBtn && !isProcessing && !improvementRun && sourceMerchant) {
+    isProcessing = true;
+    progressState = "STARTING";
+    render();
+    
+    try {
+      improvementRun = await runReadinessImprovements(sourceMerchant, (state) => {
+        progressState = state;
+        render();
+      });
+    } catch (err) {
+      console.error(err);
+      alert("An error occurred running improvements");
+    } finally {
+      isProcessing = false;
+      progressState = "COMPLETE";
+      render();
+    }
   }
 });
 
-app.addEventListener("submit", (event) => {
+app.addEventListener("submit", async (event) => {
   const form = event.target;
-  if (!(form instanceof HTMLFormElement) || !form.dataset.reviewId || !improvementRun) return;
+  if (!(form instanceof HTMLFormElement)) return;
   event.preventDefault();
-  improvementRun = resolveReviewItem(improvementRun, form.dataset.reviewId, new FormData(form).get("merchantValue"));
-  render();
+
+  if (form.id === "onboarding-form") {
+    const formData = new FormData(form);
+    const file = formData.get("csvFile") as File;
+    
+    if (!file || file.size === 0) {
+      alert("Please upload a CSV file.");
+      return;
+    }
+
+    const policies: MerchantData["policies"] = {
+      currency: formData.get("currency") as string || null,
+      maxQuantityPerItem: formData.get("maxQuantityPerItem") ? Number(formData.get("maxQuantityPerItem")) : null,
+      returnPolicy: formData.get("returnWindow") ? { windowDays: Number(formData.get("returnWindow")), summary: "Merchant return policy" } : null,
+      autonomousPurchasePolicy: formData.get("approvalThreshold") || formData.get("maxOrderValue") ? {
+        requiresApprovalAbove: formData.get("approvalThreshold") ? Number(formData.get("approvalThreshold")) : null,
+        maxOrderValue: formData.get("maxOrderValue") ? Number(formData.get("maxOrderValue")) : null,
+      } : null,
+      shippingPolicy: null
+    };
+
+    const text = await file.text();
+    ingestionResult = ingestCsv(text, "merchant-uploaded", "Uploaded Merchant", policies);
+    sourceMerchant = ingestMerchant(ingestionResult.merchant);
+    currentState = "IMPORT_SUMMARY";
+    render();
+    return;
+  }
+
+  if (form.dataset.reviewId && improvementRun) {
+    let merchantValue: unknown = new FormData(form).get("merchantValue");
+    if (typeof merchantValue === "string" && merchantValue.trim().startsWith("{")) {
+      try {
+        merchantValue = JSON.parse(merchantValue);
+      } catch (e) {
+        // ignore
+      }
+    }
+    improvementRun = resolveReviewItem(improvementRun, form.dataset.reviewId, merchantValue);
+    render();
+  }
 });
 
 render();
 
 function render(): void {
-  const currentAudit = improvementRun?.afterAudit ?? initialAudit;
+  let content = "";
+  if (currentState === "ONBOARDING") {
+    content = renderOnboarding();
+  } else if (currentState === "IMPORT_SUMMARY") {
+    content = renderImportSummary();
+  } else {
+    content = renderDashboard();
+  }
+
   app!.innerHTML = `
     <header class="page-header">
       <p class="eyebrow">AI Commerce Readiness Agent</p>
-      <h1>${escapeHtml(currentAudit.merchantName)}</h1>
+      <h1>${currentState === "ONBOARDING" ? "Connect your merchant data" : escapeHtml(sourceMerchant!.name)}</h1>
       <p class="subtitle">Audit → proposal → deterministic validation → safe application → merchant review</p>
       <div class="provider-badge">AI Provider: ${escapeHtml(aiProvider)}</div>
     </header>
+    ${content}
+  `;
+}
+
+function renderOnboarding(): string {
+  return `
+    <div class="onboarding-container">
+      <h2>Merchant Configuration</h2>
+      <form id="onboarding-form">
+        <div class="form-group">
+          <label>Upload Catalog (CSV)</label>
+          <input type="file" name="csvFile" accept=".csv" />
+        </div>
+        
+        <h3>Merchant Policies (Optional)</h3>
+        <p class="panel-note">Values entered here are authoritative.</p>
+        <div class="form-group">
+          <label>Currency</label>
+          <input type="text" name="currency" placeholder="e.g. USD, INR" />
+        </div>
+        <div class="form-group">
+          <label>Maximum Quantity Per Item</label>
+          <input type="number" name="maxQuantityPerItem" min="1" placeholder="e.g. 5" />
+        </div>
+        <div class="form-group">
+          <label>Approval Threshold (requires approval above)</label>
+          <input type="number" name="approvalThreshold" min="0" placeholder="e.g. 1000" />
+        </div>
+        <div class="form-group">
+          <label>Maximum Autonomous Order Value</label>
+          <input type="number" name="maxOrderValue" min="0" placeholder="e.g. 5000" />
+        </div>
+        <div class="form-group">
+          <label>Return Window (Days)</label>
+          <input type="number" name="returnWindow" min="0" placeholder="e.g. 30" />
+        </div>
+
+        <div class="onboarding-actions">
+          <button type="submit" class="primary-button">Upload CSV</button>
+          <button type="button" class="secondary-button" data-action="use-demo">Use demo merchant</button>
+        </div>
+      </form>
+    </div>
+  `;
+}
+
+function renderImportSummary(): string {
+  if (!ingestionResult) return "";
+  const productsCount = ingestionResult.merchant.products.length;
+  const variantsCount = ingestionResult.merchant.products.reduce((acc, p) => acc + (p.variants?.length || 0), 0);
+  const inventoryCount = ingestionResult.merchant.inventory.length;
+
+  return `
+    <div class="onboarding-container import-summary">
+      <h2>Merchant imported</h2>
+      
+      <div class="metric-group">
+        <div>
+          <div class="metric">${productsCount}</div>
+          <div>Products</div>
+        </div>
+        <div>
+          <div class="metric">${variantsCount}</div>
+          <div>Variants</div>
+        </div>
+        <div>
+          <div class="metric">${inventoryCount}</div>
+          <div>Inventory records</div>
+        </div>
+      </div>
+
+      <p>Imported: ${ingestionResult.imported} rows</p>
+      
+      ${ingestionResult.errors.length > 0 ? `
+        <div class="error-list">
+          <strong>Errors (${ingestionResult.errors.length}):</strong>
+          <ul>${ingestionResult.errors.map(e => `<li>${escapeHtml(e)}</li>`).join("")}</ul>
+        </div>
+      ` : ""}
+      
+      ${ingestionResult.warnings.length > 0 ? `
+        <div class="warning-list">
+          <strong>Warnings (${ingestionResult.warnings.length}):</strong>
+          <ul>${ingestionResult.warnings.map(w => `<li>${escapeHtml(w)}</li>`).join("")}</ul>
+        </div>
+      ` : ""}
+
+      <button class="primary-button" data-action="run-audit">Run AI Readiness Audit</button>
+    </div>
+  `;
+}
+
+function renderDashboard(): string {
+  if (!initialAudit) return "";
+  const currentAudit = improvementRun?.afterAudit ?? initialAudit;
+  return `
     ${renderFlow(currentAudit)}
     ${renderScores(currentAudit, improvementRun?.beforeAudit)}
     ${improvementRun ? renderWorkflow(improvementRun) : renderInitialAudit(currentAudit)}
@@ -87,7 +255,7 @@ function renderScores(result: ReadinessAudit, before?: ReadinessAudit): string {
     ${before ? `<article class="metric-card"><p class="card-label">Before</p><p class="metric">${before.overallScore}<small>/100</small></p><p class="metric-note">Original audit</p></article>` : ""}
     <article class="score-card"><p class="card-label">${before ? "After safe changes" : "Overall readiness"}</p><p class="score"><span>${result.overallScore}</span> / 100</p><p class="score-note">${readinessLabel(result.overallScore)}</p></article>
     <article class="metric-card"><p class="card-label">Detected issues</p><p class="metric">${result.issueCount}</p><p class="metric-note">${severitySummary(result.issues)}</p></article>
-    ${before ? `<article class="metric-card"><p class="card-label">Score movement</p><p class="metric positive">+${result.overallScore - before.overallScore}</p><p class="metric-note">From actual re-audit results</p></article>` : ""}
+    ${before ? `<article class="metric-card"><p class="card-label">Score movement</p><p class="metric positive">${result.overallScore >= before.overallScore ? '+' : ''}${result.overallScore - before.overallScore}</p><p class="metric-note">From actual re-audit results</p></article>` : ""}
   </section>
   <section class="panel" aria-labelledby="category-scores-heading"><div class="panel-heading"><div><p class="eyebrow">Scoring breakdown</p><h2 id="category-scores-heading">Category scores</h2></div><p class="panel-note">Every deduction is tied to a visible audit issue. Scores never fall below zero.</p></div><div class="category-grid">${result.categoryScores.map((category) => `<article class="category-card"><div class="category-topline"><h3>${escapeHtml(category.label)}</h3><strong>${category.score}/${category.maximum}</strong></div><div class="meter"><span style="width:${(category.score / category.maximum) * 100}%"></span></div><p>${category.deductions ? `${category.deductions} point deductions` : "No deductions"}</p></article>`).join("")}</div></section>`;
 }
@@ -119,15 +287,20 @@ function renderReviewQueue(items: ReviewItem[]): string {
 }
 
 function renderReviewForm(item: ReviewItem): string {
-  const numberInput = ["PRICE_INVALID", "INVENTORY_QUANTITY_INVALID", "AUTONOMOUS_PURCHASE_BOUNDARY_MISSING"].includes(item.issue.issueType);
-  return `<form class="review-form" data-review-id="${escapeHtml(item.id)}"><label>Merchant value<input required name="merchantValue" type="${numberInput ? "number" : "text"}" ${numberInput ? "min=\"0\" step=\"any\"" : ""} placeholder="${escapeHtml(reviewPlaceholder(item))}" /></label><button type="submit">Apply merchant decision</button></form>`;
+  const numberInput = ["PRICE_INVALID", "INVENTORY_QUANTITY_INVALID", "AUTONOMOUS_PURCHASE_BOUNDARY_MISSING", "CURRENCY_MISSING", "MAX_QUANTITY_PER_ITEM_MISSING"].includes(item.issue.issueType);
+  return `<form class="review-form" data-review-id="${escapeHtml(item.id)}"><label>Merchant value<input required name="merchantValue" type="${numberInput && item.issue.issueType !== "CURRENCY_MISSING" ? "number" : "text"}" ${numberInput && item.issue.issueType !== "CURRENCY_MISSING" ? "min=\"0\" step=\"any\"" : ""} placeholder="${escapeHtml(reviewPlaceholder(item))}" /></label><button type="submit">Apply merchant decision</button></form>`;
 }
 
 function reviewPlaceholder(item: ReviewItem): string {
-  if (item.issue.issueType === "AUTONOMOUS_PURCHASE_BOUNDARY_MISSING") return "e.g. 5000";
+  if (item.issue.issueType === "AUTONOMOUS_PURCHASE_BOUNDARY_MISSING") return "e.g. { requiresApprovalAbove: 1000, maxOrderValue: 5000 }"; // Wait, in fieldAccess it expects JSON for the policy object if we resolve it this way, or just one value?
+  // Let me just say "e.g. 1000" if the field is the specific property
+  if (item.issue.affectedField === "policies.autonomousPurchasePolicy.requiresApprovalAbove") return "e.g. 1000";
+  if (item.issue.affectedField === "policies.autonomousPurchasePolicy") return 'e.g. {"requiresApprovalAbove": 100, "maxOrderValue": 500}';
   if (item.issue.issueType === "PRICE_INVALID") return "e.g. 1999";
   if (item.issue.issueType === "INVENTORY_QUANTITY_INVALID") return "e.g. 10";
   if (item.issue.issueType === "PRODUCT_DESCRIPTION_INSUFFICIENT") return "Provide at least six words and 40 characters";
+  if (item.issue.issueType === "CURRENCY_MISSING") return "e.g. USD";
+  if (item.issue.issueType === "MAX_QUANTITY_PER_ITEM_MISSING") return "e.g. 5";
   return "Enter an explicit merchant value";
 }
 

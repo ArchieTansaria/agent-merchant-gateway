@@ -183,8 +183,21 @@ function validateMerchantValue(
     return inventory ? { valid: true, value: inventory.id } : { valid: false };
   }
   if (issue.issueType === "AUTONOMOUS_PURCHASE_BOUNDARY_MISSING") {
+    if (typeof rawValue === "object" && rawValue !== null && "requiresApprovalAbove" in rawValue && "maxOrderValue" in rawValue) {
+      const requiresApprovalAbove = Number((rawValue as any).requiresApprovalAbove);
+      const maxOrderValue = Number((rawValue as any).maxOrderValue);
+      if (Number.isFinite(requiresApprovalAbove) && requiresApprovalAbove >= 0 && Number.isFinite(maxOrderValue) && maxOrderValue >= 0) {
+        return { valid: true, value: { requiresApprovalAbove, maxOrderValue } };
+      }
+    }
+    return { valid: false };
+  }
+  if (issue.issueType === "CURRENCY_MISSING") {
+    return text.length === 3 ? { valid: true, value: text.toUpperCase() } : { valid: false };
+  }
+  if (issue.issueType === "MAX_QUANTITY_PER_ITEM_MISSING") {
     const value = Number(rawValue);
-    return Number.isFinite(value) && value >= 0 ? { valid: true, value } : { valid: false };
+    return Number.isInteger(value) && value > 0 ? { valid: true, value } : { valid: false };
   }
   return { valid: false };
 }

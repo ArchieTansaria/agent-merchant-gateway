@@ -35,6 +35,11 @@ export function readMerchantField(
   }
 
   if (entity.type === "merchant_policy") {
+    if (field === "policies.currency") return merchant.policies.currency;
+    if (field === "policies.maxQuantityPerItem") return merchant.policies.maxQuantityPerItem;
+    if (field === "policies.autonomousPurchasePolicy") {
+      return merchant.policies.autonomousPurchasePolicy;
+    }
     if (field === "policies.autonomousPurchasePolicy.requiresApprovalAbove") {
       return merchant.policies.autonomousPurchasePolicy?.requiresApprovalAbove;
     }
@@ -54,7 +59,15 @@ export function hasWritableField(entity: AffectedEntity, field: string): boolean
     );
   }
   if (entity.type === "inventory") return field === "quantity";
-  return entity.type === "merchant_policy" && field === "policies.autonomousPurchasePolicy.requiresApprovalAbove";
+  return entity.type === "merchant_policy" && (
+    field === "policies.currency" ||
+    field === "policies.maxQuantityPerItem" ||
+    field === "policies.returnPolicy" ||
+    field === "policies.shippingPolicy" ||
+    field === "policies.autonomousPurchasePolicy" ||
+    field === "policies.autonomousPurchasePolicy.requiresApprovalAbove" ||
+    field === "policies.autonomousPurchasePolicy.maxOrderValue"
+  );
 }
 
 export function writeMerchantField(
@@ -100,10 +113,37 @@ export function writeMerchantField(
     return true;
   }
 
-  if (entity.type === "merchant_policy" && field === "policies.autonomousPurchasePolicy.requiresApprovalAbove") {
-    merchant.policies.autonomousPurchasePolicy ??= {};
-    merchant.policies.autonomousPurchasePolicy.requiresApprovalAbove = value as number;
-    return true;
+  if (entity.type === "merchant_policy") {
+    if (field === "policies.currency") {
+      merchant.policies.currency = value as string;
+      return true;
+    }
+    if (field === "policies.maxQuantityPerItem") {
+      merchant.policies.maxQuantityPerItem = Number(value);
+      return true;
+    }
+    if (field === "policies.autonomousPurchasePolicy") {
+      merchant.policies.autonomousPurchasePolicy = value as any;
+      return true;
+    }
+    if (field === "policies.autonomousPurchasePolicy.requiresApprovalAbove") {
+      merchant.policies.autonomousPurchasePolicy ??= {};
+      merchant.policies.autonomousPurchasePolicy.requiresApprovalAbove = Number(value);
+      return true;
+    }
+    if (field === "policies.autonomousPurchasePolicy.maxOrderValue") {
+      merchant.policies.autonomousPurchasePolicy ??= {};
+      merchant.policies.autonomousPurchasePolicy.maxOrderValue = Number(value);
+      return true;
+    }
+    if (field === "policies.returnPolicy") {
+      merchant.policies.returnPolicy = value as any;
+      return true;
+    }
+    if (field === "policies.shippingPolicy") {
+      merchant.policies.shippingPolicy = value as any;
+      return true;
+    }
   }
 
   return false;

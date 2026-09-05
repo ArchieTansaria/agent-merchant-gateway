@@ -48,9 +48,11 @@ function validMerchant(): MerchantData {
     ],
     inventory: [{ id: "inv-1", productId: "prod-1", sku: "JACKET", quantity: 8 }],
     policies: {
+      currency: "USD",
+      maxQuantityPerItem: 10,
       returnPolicy: { windowDays: 30, summary: "Unused products may be returned in original condition." },
       shippingPolicy: { regions: ["India"], processingDays: 2 },
-      autonomousPurchasePolicy: { requiresApprovalAbove: 10000 },
+      autonomousPurchasePolicy: { requiresApprovalAbove: 10000, maxOrderValue: 20000 },
     },
   };
 }
@@ -113,6 +115,8 @@ test("incomplete merchant policies are surfaced without assigning policy values"
   const merchant = validMerchant();
   merchant.policies = {};
   assert.deepEqual(issueTypes(merchant), [
+    "CURRENCY_MISSING",
+    "MAX_QUANTITY_PER_ITEM_MISSING",
     "RETURN_POLICY_INCOMPLETE",
     "SHIPPING_POLICY_INCOMPLETE",
     "AUTONOMOUS_PURCHASE_BOUNDARY_MISSING",
@@ -166,7 +170,7 @@ test("merchant-entered policy value resolves only that review issue and re-audit
   mockFetch(null, 200, false);
   const run = await runReadinessImprovements(demoMerchant);
   const policyReview = run.reviewItems.find((item) => item.issue.issueType === "AUTONOMOUS_PURCHASE_BOUNDARY_MISSING");
-  const resolved = resolveReviewItem(run, policyReview!.id, "5000");
+  const resolved = resolveReviewItem(run, policyReview!.id, { requiresApprovalAbove: 5000, maxOrderValue: 10000 });
   assert.equal(resolved.afterAudit.overallScore, 80);
 });
 
@@ -225,13 +229,13 @@ test("a second correction run is idempotent and produces no duplicate changes", 
 test("complete merchant review can resolve the remaining demo issues to an AI-ready score", async () => {
   mockFetch(null, 200, false);
   let run = await runReadinessImprovements(demoMerchant);
-  const values: Record<string, string> = {
+  const values: Record<string, any> = {
     PRODUCT_DESCRIPTION_INSUFFICIENT: "An insulated stainless steel travel mug with a leak-resistant lid for daily commutes and warm drinks.",
     REQUIRED_ATTRIBUTE_MISSING: "8 cm × 8 cm × 15 cm",
     PRICE_INVALID: "1999",
     PRODUCT_NAME_MISSING: "Pocket Speaker",
     INVENTORY_QUANTITY_INVALID: "10",
-    AUTONOMOUS_PURCHASE_BOUNDARY_MISSING: "5000",
+    AUTONOMOUS_PURCHASE_BOUNDARY_MISSING: { requiresApprovalAbove: 5000, maxOrderValue: 10000 },
   };
   for (const item of run.reviewItems) {
     run = resolveReviewItem(run, item.id, values[item.issue.issueType]);

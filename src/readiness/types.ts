@@ -44,10 +44,13 @@ export interface ShippingPolicy {
 }
 
 export interface AutonomousPurchasePolicy {
-  requiresApprovalAbove?: number | null;
+  requiresApprovalAbove?: number | null; // strictly greater than threshold
+  maxOrderValue?: number | null; // inclusive
 }
 
 export interface MerchantPolicies {
+  currency?: string | null;
+  maxQuantityPerItem?: number | null; // inclusive
   returnPolicy?: ReturnPolicy | null;
   shippingPolicy?: ShippingPolicy | null;
   autonomousPurchasePolicy?: AutonomousPurchasePolicy | null;

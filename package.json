@@ -7,10 +7,16 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "npm run build && node --experimental-strip-types --test test/*.test.ts",
-    "start": "npm run build && node dist/server.js"
+    "start": "npm run build && node dist/server.js",
+    "dev": "npm start"
   },
   "devDependencies": {
     "@types/node": "^26.4.1",
-    "typescript": "^5.7.3"
+    "@types/papaparse": "^5.5.2",
+    "typescript": "^5.7.3",
+    "vite": "^8.2.2"
+  },
+  "dependencies": {
+    "papaparse": "^5.7.0"
   }
 }

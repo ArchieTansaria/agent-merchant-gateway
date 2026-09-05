@@ -46,6 +46,8 @@ function normalizeInventory(value: unknown, index: number): InventoryItem {
 function normalizePolicies(value: unknown): MerchantPolicies {
   const source = isRecord(value) ? value : {};
   return {
+    currency: asNullableString(source.currency) ?? undefined,
+    maxQuantityPerItem: asNullableNumber(source.maxQuantityPerItem) ?? undefined,
     returnPolicy: isRecord(source.returnPolicy)
       ? { windowDays: asNullableNumber(source.returnPolicy.windowDays), summary: asNullableString(source.returnPolicy.summary) }
       : null,
@@ -58,7 +60,10 @@ function normalizePolicies(value: unknown): MerchantPolicies {
         }
       : null,
     autonomousPurchasePolicy: isRecord(source.autonomousPurchasePolicy)
-      ? { requiresApprovalAbove: asNullableNumber(source.autonomousPurchasePolicy.requiresApprovalAbove) }
+      ? { 
+          requiresApprovalAbove: asNullableNumber(source.autonomousPurchasePolicy.requiresApprovalAbove),
+          maxOrderValue: asNullableNumber(source.autonomousPurchasePolicy.maxOrderValue)
+        }
       : null,
   };
 }

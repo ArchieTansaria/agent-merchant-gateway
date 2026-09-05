@@ -148,3 +148,17 @@ code { color: #5d5fef; font-family: "SFMono-Regular", Consolas, monospace; font-
   .flow-score { width: 100%; margin-left: 0; }
   .change-row, .review-card { grid-template-columns: 1fr; }
 }
+
+.onboarding-container { max-width: 600px; margin: 0 auto; padding: 40px; background: #fff; border: 1px solid #e4e7ec; border-radius: 12px; }
+.onboarding-container h2 { margin-bottom: 24px; }
+.form-group { margin-bottom: 20px; }
+.form-group label { display: block; margin-bottom: 8px; font-weight: 650; font-size: 0.875rem; color: #344054; }
+.form-group input, .form-group select { width: 100%; padding: 10px 12px; border: 1px solid #d0d5dd; border-radius: 8px; font: inherit; }
+.form-group input[type="file"] { padding: 8px; }
+.onboarding-actions { display: flex; gap: 16px; margin-top: 32px; }
+.secondary-button { background: #fff; color: #344054; border: 1px solid #d0d5dd; border-radius: 8px; cursor: pointer; font: inherit; font-weight: 700; padding: 9px 13px; }
+.import-summary { text-align: center; padding: 40px; }
+.import-summary .metric-group { display: flex; justify-content: center; gap: 24px; margin: 24px 0; }
+.import-summary .metric { font-size: 2rem; color: #5d5fef; font-weight: 700; }
+.error-list { text-align: left; background: #fef3f2; color: #b42318; padding: 16px; border-radius: 8px; margin-bottom: 24px; font-size: 0.875rem; max-height: 200px; overflow-y: auto; }
+.warning-list { text-align: left; background: #fffaeb; color: #b54708; padding: 16px; border-radius: 8px; margin-bottom: 24px; font-size: 0.875rem; max-height: 200px; overflow-y: auto; }

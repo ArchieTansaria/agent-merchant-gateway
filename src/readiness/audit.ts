@@ -403,7 +403,33 @@ function auditPolicies(
     id: merchant.id,
     name: merchant.name,
   };
-  const { returnPolicy, shippingPolicy, autonomousPurchasePolicy } = merchant.policies;
+  const { currency, maxQuantityPerItem, returnPolicy, shippingPolicy, autonomousPurchasePolicy } = merchant.policies;
+
+  if (!currency || typeof currency !== "string" || currency.trim() === "") {
+    addIssue({
+      issueType: "CURRENCY_MISSING",
+      severity: "high",
+      category: "policyCompleteness",
+      entity,
+      field: "policies.currency",
+      message: "Merchant currency is missing.",
+      explanation: "A currency must be specified for autonomous purchasing.",
+      scoreImpact: 5,
+    });
+  }
+
+  if (!isNonNegativeInteger(maxQuantityPerItem)) {
+    addIssue({
+      issueType: "MAX_QUANTITY_PER_ITEM_MISSING",
+      severity: "high",
+      category: "policyCompleteness",
+      entity,
+      field: "policies.maxQuantityPerItem",
+      message: "Maximum quantity per item is missing or invalid.",
+      explanation: "A maximum quantity per item must be explicitly defined.",
+      scoreImpact: 5,
+    });
+  }
 
   if (
     !returnPolicy ||
@@ -441,16 +467,17 @@ function auditPolicies(
 
   if (
     !autonomousPurchasePolicy ||
-    !isNonNegativeFiniteNumber(autonomousPurchasePolicy.requiresApprovalAbove)
+    !isNonNegativeFiniteNumber(autonomousPurchasePolicy.requiresApprovalAbove) ||
+    !isNonNegativeFiniteNumber(autonomousPurchasePolicy.maxOrderValue)
   ) {
     addIssue({
       issueType: "AUTONOMOUS_PURCHASE_BOUNDARY_MISSING",
       severity: "high",
       category: "policyCompleteness",
       entity,
-      field: "policies.autonomousPurchasePolicy.requiresApprovalAbove",
-      message: "Autonomous purchase approval boundary is not defined.",
-      explanation: "The merchant must explicitly set this sensitive commerce policy; the readiness agent will not invent it.",
+      field: "policies.autonomousPurchasePolicy",
+      message: "Autonomous purchase policy is missing required boundaries.",
+      explanation: "Merchants must explicitly define an approval threshold and maximum order value.",
       scoreImpact: 5,
     });
   }

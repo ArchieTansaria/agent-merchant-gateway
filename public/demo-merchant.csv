@@ -1,0 +1,9 @@
+sku,name,description,category,price,stock,size,color
+LIN-SHIRT-BLU-S,Coastal Linen Shirt,A breathable linen shirt with a relaxed fit.,apparel ,2499,12,S,blue
+LIN-SHIRT-BLU-M,Coastal Linen Shirt,A breathable linen shirt with a relaxed fit.,apparel ,2499,8,M,blue
+LIN-SHIRT-WHT-S,Coastal Linen Shirt,A breathable linen shirt with a relaxed fit.,apparel ,2499,0,S,white
+MUG-BLACK,Travel Mug,Steel mug.,Home,0,-2,,black
+MUG-WHITE,Travel Mug,Steel mug.,Home,2000,5,,
+SPKR-POCKET,Coastal Pocket Speaker,,Electronics,4999,6,,
+RUN-SHOE-BLK-10,Coastal Runner,,running,8900,10,10,blk
+RUN-SHOE-BLK-11,Coastal Runner,,running,8900,4,11,blk
