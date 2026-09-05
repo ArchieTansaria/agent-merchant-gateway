@@ -165,6 +165,19 @@ async function handleGeminiApi(payload: any): Promise<any> {
   });
 }
 
+// Commerce imports
+import { publishMerchant } from "./commerce/store.js";
+import { searchProducts, getProduct, checkInventory, createCart, addToCart, removeFromCart, getCart, checkout } from "./commerce/service.js";
+import { verifyPaymentSignature } from "./commerce/razorpay.js";
+
+function getSessionId(req: IncomingMessage): string {
+  const sessionId = req.headers["x-merchant-session-id"];
+  if (!sessionId || Array.isArray(sessionId)) {
+    throw new Error("Missing or invalid x-merchant-session-id header");
+  }
+  return sessionId as string;
+}
+
 const server = createServer(async (req, res) => {
   const parsedUrl = new URL(req.url || "/", `http://${req.headers.host}`);
   
@@ -187,6 +200,112 @@ const server = createServer(async (req, res) => {
     const hasKey = !!process.env.GEMINI_API_KEY;
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ provider, hasKey }));
+    return;
+  }
+
+  // Commerce Routes
+  try {
+    if (req.method === "POST" && parsedUrl.pathname === "/api/merchant/publish") {
+      const sessionId = getSessionId(req);
+      const merchantData = await parseBody(req);
+      publishMerchant(sessionId, merchantData);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ success: true, sessionId }));
+      return;
+    }
+
+    if (req.method === "GET" && parsedUrl.pathname === "/api/commerce/products") {
+      const sessionId = getSessionId(req);
+      const query = parsedUrl.searchParams.get("query") || undefined;
+      const products = searchProducts(sessionId, query);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(products));
+      return;
+    }
+
+    if (req.method === "GET" && parsedUrl.pathname.startsWith("/api/commerce/products/")) {
+      const sessionId = getSessionId(req);
+      const productId = parsedUrl.pathname.split("/").pop();
+      if (!productId) throw new Error("Missing product ID");
+      const product = getProduct(sessionId, productId);
+      if (!product) throw new Error("Product not found");
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(product));
+      return;
+    }
+
+    if (req.method === "GET" && parsedUrl.pathname.startsWith("/api/commerce/inventory/")) {
+      const sessionId = getSessionId(req);
+      const variantId = parsedUrl.pathname.split("/").pop();
+      const quantity = parseInt(parsedUrl.searchParams.get("quantity") || "1", 10);
+      if (!variantId) throw new Error("Missing variant ID");
+      const isAvailable = checkInventory(sessionId, variantId, quantity);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ available: isAvailable }));
+      return;
+    }
+
+    if (req.method === "POST" && parsedUrl.pathname === "/api/commerce/carts") {
+      const sessionId = getSessionId(req);
+      const cart = createCart(sessionId);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(cart));
+      return;
+    }
+
+    if (req.method === "GET" && parsedUrl.pathname.startsWith("/api/commerce/carts/") && !parsedUrl.pathname.includes("/items")) {
+      const cartId = parsedUrl.pathname.split("/").pop();
+      if (!cartId) throw new Error("Missing cart ID");
+      const cart = getCart(cartId);
+      if (!cart) throw new Error("Cart not found");
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(cart));
+      return;
+    }
+
+    if (req.method === "POST" && parsedUrl.pathname.match(/^\/api\/commerce\/carts\/([^\/]+)\/items$/)) {
+      const sessionId = getSessionId(req);
+      const match = parsedUrl.pathname.match(/^\/api\/commerce\/carts\/([^\/]+)\/items$/);
+      const cartId = match![1];
+      const body = await parseBody(req);
+      addToCart(sessionId, cartId, body.productId, body.variantId, body.quantity);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ success: true }));
+      return;
+    }
+
+    if (req.method === "DELETE" && parsedUrl.pathname.match(/^\/api\/commerce\/carts\/([^\/]+)\/items$/)) {
+      const sessionId = getSessionId(req);
+      const match = parsedUrl.pathname.match(/^\/api\/commerce\/carts\/([^\/]+)\/items$/);
+      const cartId = match![1];
+      const body = await parseBody(req);
+      removeFromCart(sessionId, cartId, body.productId, body.variantId);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ success: true }));
+      return;
+    }
+
+    if (req.method === "POST" && parsedUrl.pathname === "/api/commerce/checkout") {
+      const sessionId = getSessionId(req);
+      const body = await parseBody(req);
+      const result = await checkout(sessionId, body.cartId, body.forceApprove);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(result));
+      return;
+    }
+
+    if (req.method === "POST" && parsedUrl.pathname === "/api/commerce/payment/verify") {
+      const body = await parseBody(req);
+      const isValid = verifyPaymentSignature(body);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ verified: isValid }));
+      return;
+    }
+
+  } catch (err: any) {
+    console.error("[Commerce API Error]", err.message);
+    res.writeHead(400, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: err.message }));
     return;
   }
 

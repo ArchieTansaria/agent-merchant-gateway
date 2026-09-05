@@ -2,10 +2,11 @@ import { demoMerchant } from "./data/demoMerchant.js";
 import { auditMerchant } from "./readiness/audit.js";
 import { ingestMerchant } from "./readiness/ingest.js";
 import { resolveReviewItem, runReadinessImprovements } from "./readiness/workflow.js";
-import { ingestCsv, IngestionResult } from "./readiness/ingestCsv.js";
+import { CsvCatalogSource } from "./readiness/source.js";
+import type { IngestionResult } from "./readiness/ingestCsv.js";
 import type { ImprovementRun, ReadinessAudit, ReadinessIssue, ReviewItem, MerchantData } from "./readiness/types.js";
 
-type AppState = "ONBOARDING" | "IMPORT_SUMMARY" | "DASHBOARD";
+type AppState = "ONBOARDING" | "ONBOARDING_CSV" | "IMPORT_SUMMARY" | "DASHBOARD" | "COMMERCE";
 
 let currentState: AppState = "ONBOARDING";
 let sourceMerchant: MerchantData | null = null;
@@ -15,6 +16,14 @@ let isProcessing = false;
 let progressState = "";
 let aiProvider = "Loading provider...";
 let ingestionResult: IngestionResult | null = null;
+let commerceSessionId: string | null = null;
+
+// Commerce state
+let commerceProducts: any[] = [];
+let commerceCartId: string | null = null;
+let commerceCart: any = null;
+let commerceCheckoutResult: any = null;
+let commerceSearchQuery = "";
 
 const app = document.querySelector<HTMLElement>("#app");
 if (!app) throw new Error("Dashboard root element was not found.");
@@ -69,6 +78,53 @@ app.addEventListener("click", async (event) => {
       progressState = "COMPLETE";
       render();
     }
+    return;
+  }
+
+  const publishBtn = target.closest<HTMLButtonElement>("button[data-action='publish']");
+  if (publishBtn && sourceMerchant && improvementRun) {
+    publishBtn.disabled = true;
+    publishBtn.textContent = "Publishing...";
+    try {
+      const payload = improvementRun.merchant;
+      const res = await fetch("/api/merchant/publish", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-merchant-session-id": "sess-" + Math.random().toString(36).substring(2, 9)
+        },
+        body: JSON.stringify(payload)
+      });
+      if (!res.ok) throw new Error(await res.text());
+      const data = await res.json();
+      commerceSessionId = data.sessionId;
+      currentState = "COMMERCE";
+      await loadCommerceState();
+    } catch (e: any) {
+      alert("Failed to publish: " + e.message);
+      publishBtn.disabled = false;
+      publishBtn.textContent = "Publish to AI Commerce";
+    }
+    return;
+  }
+
+  const selectSourceBtn = target.closest<HTMLButtonElement>("button[data-source]");
+  if (selectSourceBtn) {
+    const source = selectSourceBtn.dataset.source;
+    if (source === "csv") {
+      currentState = "ONBOARDING_CSV";
+      render();
+    } else {
+      alert(source + " integration is coming soon!");
+    }
+    return;
+  }
+  
+  const backBtn = target.closest<HTMLButtonElement>("button[data-action='back']");
+  if (backBtn) {
+    currentState = "ONBOARDING";
+    render();
+    return;
   }
 });
 
@@ -98,7 +154,12 @@ app.addEventListener("submit", async (event) => {
     };
 
     const text = await file.text();
-    ingestionResult = ingestCsv(text, "merchant-uploaded", "Uploaded Merchant", policies);
+    const source = new CsvCatalogSource(text);
+    ingestionResult = await source.import({ merchantId: "merchant-uploaded", merchantName: "Uploaded Merchant" });
+    
+    // Explicitly apply authoritative merchant policies to the canonical merchant state
+    ingestionResult.merchant.policies = policies;
+
     sourceMerchant = ingestMerchant(ingestionResult.merchant);
     currentState = "IMPORT_SUMMARY";
     render();
@@ -119,22 +180,213 @@ app.addEventListener("submit", async (event) => {
   }
 });
 
+// COMMERCE API HELPERS
+async function commerceApi(path: string, options: RequestInit = {}) {
+  const headers = { ...options.headers, "x-merchant-session-id": commerceSessionId! } as any;
+  if (options.body) headers["Content-Type"] = "application/json";
+  
+  const res = await fetch(`/api/commerce${path}`, { ...options, headers });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+async function loadCommerceState() {
+  try {
+    commerceProducts = await commerceApi("/products");
+    if (!commerceCartId) {
+      const cart = await commerceApi("/carts", { method: "POST" });
+      commerceCartId = cart.id;
+      commerceCart = cart;
+    } else {
+      commerceCart = await commerceApi(`/carts/${commerceCartId}`);
+    }
+    render();
+  } catch (e) {
+    console.error("Failed to load commerce state", e);
+  }
+}
+
+app.addEventListener("click", async (event) => {
+  const target = event.target as Element;
+  
+  const addBtn = target.closest<HTMLButtonElement>("button[data-commerce-action='add-to-cart']");
+  if (addBtn && commerceCartId) {
+    const productId = addBtn.dataset.productId;
+    const variantId = addBtn.dataset.variantId || null;
+    const quantity = parseInt(addBtn.dataset.quantity || "1", 10);
+    
+    try {
+      addBtn.disabled = true;
+      addBtn.textContent = "Adding...";
+      await commerceApi(`/carts/${commerceCartId}/items`, {
+        method: "POST",
+        body: JSON.stringify({ productId, variantId, quantity })
+      });
+      // reload cart
+      commerceCart = await commerceApi(`/carts/${commerceCartId}`);
+      commerceCheckoutResult = null; // reset previous checkout status
+      render();
+    } catch (e: any) {
+      alert("Failed to add to cart: " + JSON.parse(e.message).error);
+    } finally {
+      if (addBtn) {
+        addBtn.disabled = false;
+        addBtn.textContent = "Add to Cart";
+      }
+    }
+    return;
+  }
+
+  const removeBtn = target.closest<HTMLButtonElement>("button[data-commerce-action='remove-from-cart']");
+  if (removeBtn && commerceCartId) {
+    const productId = removeBtn.dataset.productId;
+    const variantId = removeBtn.dataset.variantId || null;
+    
+    try {
+      removeBtn.disabled = true;
+      await commerceApi(`/carts/${commerceCartId}/items`, {
+        method: "DELETE",
+        body: JSON.stringify({ productId, variantId })
+      });
+      // reload cart
+      commerceCart = await commerceApi(`/carts/${commerceCartId}`);
+      commerceCheckoutResult = null; // reset previous checkout status
+      render();
+    } catch (e: any) {
+      alert("Failed to remove from cart: " + (e.message.startsWith("{") ? JSON.parse(e.message).error : e.message));
+      removeBtn.disabled = false;
+    }
+    return;
+  }
+
+  const checkoutBtn = target.closest<HTMLButtonElement>("button[data-commerce-action='checkout']");
+  if (checkoutBtn && commerceCartId) {
+    try {
+      checkoutBtn.disabled = true;
+      checkoutBtn.textContent = "Checking out...";
+      commerceCheckoutResult = await commerceApi("/checkout", {
+        method: "POST",
+        body: JSON.stringify({ cartId: commerceCartId })
+      });
+      
+      if (commerceCheckoutResult.status === "ALLOW" && commerceCheckoutResult.razorpayOrderId) {
+        initiateRazorpay(commerceCheckoutResult);
+      }
+      
+      render();
+    } catch (e: any) {
+      alert("Checkout error: " + e.message);
+    } finally {
+      if (checkoutBtn) {
+        checkoutBtn.disabled = false;
+        checkoutBtn.textContent = "Checkout Server Cart";
+      }
+    }
+    return;
+  }
+
+  const checkoutApproveBtn = target.closest<HTMLButtonElement>("button[data-commerce-action='checkout-approve']");
+  if (checkoutApproveBtn && commerceCartId) {
+    try {
+      checkoutApproveBtn.disabled = true;
+      checkoutApproveBtn.textContent = "Approving & Checking out...";
+      commerceCheckoutResult = await commerceApi("/checkout", {
+        method: "POST",
+        body: JSON.stringify({ cartId: commerceCartId, forceApprove: true })
+      });
+      
+      if (commerceCheckoutResult.status === "ALLOW" && commerceCheckoutResult.razorpayOrderId) {
+        initiateRazorpay(commerceCheckoutResult);
+      }
+      
+      render();
+    } catch (e: any) {
+      alert("Checkout error: " + e.message);
+      checkoutApproveBtn.disabled = false;
+      checkoutApproveBtn.textContent = "Manually Approve & Checkout";
+    }
+    return;
+  }
+});
+
+app.addEventListener("input", async (event) => {
+  const target = event.target as Element;
+  if (target.id === "commerce-search") {
+    commerceSearchQuery = (target as HTMLInputElement).value;
+    try {
+      commerceProducts = await commerceApi(`/products?query=${encodeURIComponent(commerceSearchQuery)}`);
+      render();
+    } catch (e) {
+      console.error(e);
+    }
+  }
+});
+
+function initiateRazorpay(result: any) {
+  const options = {
+    key: "rzp_test_TYP6kyGg9ZJh2q", // Test mode public key
+    amount: result.amount,
+    currency: result.currency,
+    name: "AI Commerce Demo",
+    description: "Test Transaction",
+    order_id: result.razorpayOrderId,
+    handler: async function (response: any) {
+      try {
+        const verify = await commerceApi("/payment/verify", {
+          method: "POST",
+          body: JSON.stringify({
+            razorpay_order_id: response.razorpay_order_id,
+            razorpay_payment_id: response.razorpay_payment_id,
+            razorpay_signature: response.razorpay_signature
+          })
+        });
+        if (verify.verified) {
+          alert("Payment verified successfully!");
+          // Reset cart
+          commerceCartId = null;
+          commerceCheckoutResult = null;
+          await loadCommerceState();
+        } else {
+          alert("Payment verification failed!");
+        }
+      } catch (e) {
+        alert("Verification error!");
+      }
+    },
+    theme: {
+      color: "#5d5fef"
+    }
+  };
+  const rzp = new (window as any).Razorpay(options);
+  rzp.open();
+}
+
 render();
 
 function render(): void {
   let content = "";
   if (currentState === "ONBOARDING") {
-    content = renderOnboarding();
+    content = renderOnboardingSource();
+  } else if (currentState === "ONBOARDING_CSV") {
+    content = renderOnboardingCsv();
   } else if (currentState === "IMPORT_SUMMARY") {
     content = renderImportSummary();
-  } else {
+  } else if (currentState === "DASHBOARD") {
     content = renderDashboard();
+  } else if (currentState === "COMMERCE") {
+    if (!commerceCartId) {
+      // First render of commerce state, we kick off load and show loading state
+      loadCommerceState();
+      content = `<p style="text-align:center; padding: 40px;">Loading commerce state...</p>`;
+    } else {
+      content = renderCommercePlayground();
+    }
   }
 
   app!.innerHTML = `
     <header class="page-header">
       <p class="eyebrow">AI Commerce Readiness Agent</p>
-      <h1>${currentState === "ONBOARDING" ? "Connect your merchant data" : escapeHtml(sourceMerchant!.name)}</h1>
+      <h1>${(currentState === "ONBOARDING" || currentState === "ONBOARDING_CSV") ? "Connect your commerce stack" : escapeHtml(sourceMerchant!.name)}</h1>
       <p class="subtitle">Audit → proposal → deterministic validation → safe application → merchant review</p>
       <div class="provider-badge">AI Provider: ${escapeHtml(aiProvider)}</div>
     </header>
@@ -142,17 +394,56 @@ function render(): void {
   `;
 }
 
-function renderOnboarding(): string {
+function renderOnboardingSource(): string {
+  return `
+    <div class="onboarding-container" style="max-width: 860px; padding: 56px 48px; border: none; box-shadow: 0 8px 32px rgba(0,0,0,0.03);">
+      <h2 style="text-align: center; margin-bottom: 12px; font-size: 1.35rem; color: #101828;">Connect your commerce stack</h2>
+      <p class="panel-note" style="text-align: center; margin: 0 auto 40px; font-size: 0.95rem; line-height: 1.5; max-width: 520px; color: #667085;">
+        Make your existing catalog ready for AI buyers. Your existing commerce systems remain the source of truth.
+      </p>
+      
+      <div class="source-cards">
+        <button type="button" class="source-card" data-source="Shopify">
+          <strong>Shopify</strong>
+          <span class="subtext">Auto-sync catalog</span>
+          <span class="action-text">Connect</span>
+        </button>
+
+        <button type="button" class="source-card" data-source="Merchant API">
+          <strong>Merchant API</strong>
+          <span class="subtext">Connect your existing API</span>
+          <span class="action-text">Connect</span>
+        </button>
+
+        <button type="button" class="source-card" data-source="csv">
+          <strong>Import Catalog CSV</strong>
+          <span class="subtext">Use an existing catalog export</span>
+          <span class="action-text">Import</span>
+        </button>
+      </div>
+
+      <div style="text-align: center; margin-top: 48px;">
+        <button type="button" class="secondary-button" data-action="use-demo" style="border:none; background:none; color: #344054; font-weight: 700; padding: 0;">Use demo merchant instead</button>
+      </div>
+    </div>
+  `;
+}
+
+function renderOnboardingCsv(): string {
   return `
     <div class="onboarding-container">
-      <h2>Merchant Configuration</h2>
+      <div style="margin-bottom: 24px;">
+        <button type="button" data-action="back" style="background:none; border:none; color:var(--text-muted); cursor:pointer; font:inherit; padding:0;">← Back to sources</button>
+      </div>
+      <h2>Import Catalog (CSV)</h2>
+      
       <form id="onboarding-form">
         <div class="form-group">
-          <label>Upload Catalog (CSV)</label>
-          <input type="file" name="csvFile" accept=".csv" />
+          <label>Upload CSV File</label>
+          <input type="file" name="csvFile" accept=".csv" required />
         </div>
         
-        <h3>Merchant Policies (Optional)</h3>
+        <h3 style="margin-top: 2rem;">Merchant Policies (Optional)</h3>
         <p class="panel-note">Values entered here are authoritative.</p>
         <div class="form-group">
           <label>Currency</label>
@@ -175,9 +466,8 @@ function renderOnboarding(): string {
           <input type="number" name="returnWindow" min="0" placeholder="e.g. 30" />
         </div>
 
-        <div class="onboarding-actions">
-          <button type="submit" class="primary-button">Upload CSV</button>
-          <button type="button" class="secondary-button" data-action="use-demo">Use demo merchant</button>
+        <div class="onboarding-actions" style="margin-top: 2rem;">
+          <button type="submit" class="primary-button">Connect Integration</button>
         </div>
       </form>
     </div>
@@ -243,9 +533,18 @@ function renderDashboard(): string {
 function renderFlow(audit: ReadinessAudit): string {
   const state = isProcessing ? "processing" : improvementRun ? "complete" : "idle";
   const btnText = isProcessing ? progressState : improvementRun ? "AI Improvements Applied" : "Run AI Improvements";
+  
+  let actionBtn = `<button class="primary-button" data-action="run-improvements" ${state === "idle" ? "" : "disabled"}>${escapeHtml(btnText)}</button>`;
+  
+  if (state === "complete" && audit.overallScore >= 90) {
+    actionBtn = `<button class="primary-button" style="background:#039855; border-color:#039855;" data-action="publish">Publish to AI Commerce</button>`;
+  } else if (state === "complete") {
+     actionBtn = `<button class="primary-button" disabled>Resolve issues to publish</button>`;
+  }
+
   return `<section class="flow-strip state-${state}" aria-label="Readiness workflow">
     <span>1. Audit</span><span>2. AI proposals</span><span>3. Safety validation</span><span>4. Apply safe changes</span><span>5. Merchant review</span><span>6. Re-audit</span>
-    <button class="primary-button" data-action="run-improvements" ${state === "idle" ? "" : "disabled"}>${escapeHtml(btnText)}</button>
+    ${actionBtn}
     <span class="flow-score">Current: ${audit.overallScore}/100</span>
   </section>`;
 }
@@ -287,13 +586,12 @@ function renderReviewQueue(items: ReviewItem[]): string {
 }
 
 function renderReviewForm(item: ReviewItem): string {
-  const numberInput = ["PRICE_INVALID", "INVENTORY_QUANTITY_INVALID", "AUTONOMOUS_PURCHASE_BOUNDARY_MISSING", "CURRENCY_MISSING", "MAX_QUANTITY_PER_ITEM_MISSING"].includes(item.issue.issueType);
+  const numberInput = ["PRICE_INVALID", "INVENTORY_QUANTITY_INVALID", "CURRENCY_MISSING", "MAX_QUANTITY_PER_ITEM_MISSING", "INVENTORY_LINK_MISSING"].includes(item.issue.issueType);
   return `<form class="review-form" data-review-id="${escapeHtml(item.id)}"><label>Merchant value<input required name="merchantValue" type="${numberInput && item.issue.issueType !== "CURRENCY_MISSING" ? "number" : "text"}" ${numberInput && item.issue.issueType !== "CURRENCY_MISSING" ? "min=\"0\" step=\"any\"" : ""} placeholder="${escapeHtml(reviewPlaceholder(item))}" /></label><button type="submit">Apply merchant decision</button></form>`;
 }
 
 function reviewPlaceholder(item: ReviewItem): string {
-  if (item.issue.issueType === "AUTONOMOUS_PURCHASE_BOUNDARY_MISSING") return "e.g. { requiresApprovalAbove: 1000, maxOrderValue: 5000 }"; // Wait, in fieldAccess it expects JSON for the policy object if we resolve it this way, or just one value?
-  // Let me just say "e.g. 1000" if the field is the specific property
+  if (item.issue.issueType === "AUTONOMOUS_PURCHASE_BOUNDARY_MISSING") return "e.g. {\"requiresApprovalAbove\":1000,\"maxOrderValue\":5000}";
   if (item.issue.affectedField === "policies.autonomousPurchasePolicy.requiresApprovalAbove") return "e.g. 1000";
   if (item.issue.affectedField === "policies.autonomousPurchasePolicy") return 'e.g. {"requiresApprovalAbove": 100, "maxOrderValue": 500}';
   if (item.issue.issueType === "PRICE_INVALID") return "e.g. 1999";
@@ -301,6 +599,7 @@ function reviewPlaceholder(item: ReviewItem): string {
   if (item.issue.issueType === "PRODUCT_DESCRIPTION_INSUFFICIENT") return "Provide at least six words and 40 characters";
   if (item.issue.issueType === "CURRENCY_MISSING") return "e.g. USD";
   if (item.issue.issueType === "MAX_QUANTITY_PER_ITEM_MISSING") return "e.g. 5";
+  if (item.issue.issueType === "INVENTORY_LINK_MISSING") return "Enter starting stock quantity (e.g. 10)";
   return "Enter an explicit merchant value";
 }
 
@@ -326,4 +625,105 @@ function formatValue(value: unknown): string {
 
 function escapeHtml(value: string): string {
   return value.replace(/[&<>'"]/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[character] ?? character);
+}
+
+function renderCommercePlayground(): string {
+  // Products HTML
+  const productsHtml = commerceProducts.map(p => {
+    // If it has variants, we show them, else we just use the product as the variant
+    const options = p.variants && p.variants.length > 0 
+      ? p.variants.map((v: any) => `
+        <div style="margin-top: 8px; padding: 8px; border: 1px solid #e4e7ec; border-radius: 4px;">
+          <small>${escapeHtml(JSON.stringify(v.options || v.sku))}</small>
+          <div style="margin-top: 4px;">
+            <button class="secondary-button" data-commerce-action="add-to-cart" data-product-id="${escapeHtml(p.id)}" data-variant-id="${escapeHtml(v.sku)}">Add 1</button>
+            <button class="secondary-button" data-commerce-action="add-to-cart" data-product-id="${escapeHtml(p.id)}" data-variant-id="${escapeHtml(v.sku)}" data-quantity="10">Try Add 10 (Violate Max Qty)</button>
+          </div>
+        </div>
+      `).join("")
+      : `
+        <div style="margin-top: 8px;">
+          <button class="secondary-button" data-commerce-action="add-to-cart" data-product-id="${escapeHtml(p.id)}">Add 1</button>
+        </div>
+      `;
+
+    return `
+      <article class="source-card" style="cursor: default;">
+        <strong>${escapeHtml(p.name)}</strong>
+        <p class="subtext">${escapeHtml(p.description || "No description")}</p>
+        <p><strong>${p.price}</strong></p>
+        <div style="width: 100%;">
+          ${options}
+        </div>
+      </article>
+    `;
+  }).join("");
+
+  // Cart HTML
+  let cartHtml = "<p>Cart is empty</p>";
+  if (commerceCart && commerceCart.items && commerceCart.items.length > 0) {
+    cartHtml = commerceCart.items.map((item: any) => `
+      <div style="display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #eaecf0; align-items: center;">
+        <div>
+          <span>${escapeHtml(item.productId)} (${escapeHtml(item.variantId || "default")})</span>
+          <br/>
+          <strong>x${item.quantity}</strong>
+        </div>
+        <button class="secondary-button" style="padding: 4px 8px; font-size: 12px; color: #b42318; border-color: #fca5a5;" data-commerce-action="remove-from-cart" data-product-id="${escapeHtml(item.productId)}" data-variant-id="${escapeHtml(item.variantId || "")}">Remove</button>
+      </div>
+    `).join("");
+  }
+
+  // Checkout Result HTML
+  let checkoutHtml = "";
+  if (commerceCheckoutResult) {
+    const statusColor = commerceCheckoutResult.status === "ALLOW" ? "#027a48" : commerceCheckoutResult.status === "DENY" ? "#b42318" : "#b54708";
+    const statusBg = commerceCheckoutResult.status === "ALLOW" ? "#ecfdf3" : commerceCheckoutResult.status === "DENY" ? "#fef3f2" : "#fffaeb";
+    checkoutHtml = `
+      <div style="margin-top: 16px; padding: 16px; border-radius: 8px; background: ${statusBg}; color: ${statusColor};">
+        <strong>${commerceCheckoutResult.status}</strong>: ${escapeHtml(commerceCheckoutResult.reason || "")}
+        <br/>
+        <small>${escapeHtml(commerceCheckoutResult.code || "")}</small>
+        ${commerceCheckoutResult.status === "REQUIRE_APPROVAL" ? `
+        <div style="margin-top: 12px;">
+          <button class="primary-button" style="width: 100%; justify-content: center; background: #e04f16; border-color: #e04f16;" data-commerce-action="checkout-approve">Manually Approve & Checkout</button>
+        </div>` : ""}
+      </div>
+    `;
+  }
+
+  return `
+    <div style="display: grid; grid-template-columns: 2fr 1fr; gap: 24px; padding: 24px;">
+      <section class="panel">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">Commerce API</p>
+            <h2>Products Search</h2>
+          </div>
+        </div>
+        <div style="padding: 16px;">
+          <input type="text" id="commerce-search" placeholder="Search products..." value="${escapeHtml(commerceSearchQuery)}" style="width: 100%; padding: 10px; border-radius: 8px; border: 1px solid #d0d5dd; margin-bottom: 16px; font: inherit;" />
+          <div class="source-cards" style="grid-template-columns: 1fr 1fr; gap: 16px;">
+            ${productsHtml || "<p>No products found.</p>"}
+          </div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">Server-side Cart</p>
+            <h2>Current Cart</h2>
+          </div>
+        </div>
+        <div style="padding: 16px;">
+          ${cartHtml}
+          <div style="margin-top: 24px;">
+            <button class="primary-button" style="width: 100%; justify-content: center;" data-commerce-action="checkout" ${!commerceCart || !commerceCart.items || commerceCart.items.length === 0 ? "disabled" : ""}>Checkout Server Cart</button>
+          </div>
+          ${checkoutHtml}
+        </div>
+      </section>
+    </div>
+  `;
 }

@@ -129,3 +129,14 @@ test("CSV Ingestion - quoted commas, escaped quotes, CRLF, empty fields and mult
   assert.equal(result.merchant.products[1].description, 'She said "Hello"');
   assert.equal(result.merchant.products[1].price, null);
 });
+
+test("CsvCatalogSource adapter", async () => {
+  const { CsvCatalogSource } = await import("../dist/readiness/source.js");
+  const csv = "sku,name\nPROD-1,Product 1";
+  const source = new CsvCatalogSource(csv);
+  assert.equal(source.name, "CSV Catalog Source");
+  assert.equal(source.type, "CSV");
+  const result = await source.import({ merchantId: "m2", merchantName: "M2" });
+  assert.equal(result.merchant.id, "m2");
+  assert.equal(result.imported, 1);
+});

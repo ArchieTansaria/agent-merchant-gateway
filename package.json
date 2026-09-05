@@ -13,10 +13,12 @@
   "devDependencies": {
     "@types/node": "^26.4.1",
     "@types/papaparse": "^5.5.2",
+    "@types/uuid": "^10.0.0",
     "typescript": "^5.7.3",
     "vite": "^8.2.2"
   },
   "dependencies": {
-    "papaparse": "^5.7.0"
+    "papaparse": "^5.7.0",
+    "uuid": "^14.0.2"
   }
 }

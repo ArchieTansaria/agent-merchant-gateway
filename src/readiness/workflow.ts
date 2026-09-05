@@ -100,7 +100,21 @@ export function resolveReviewItem(
   if (!merchantValue.valid) return run;
 
   const beforeValue = readIssueValue(merchant, reviewItem.issue);
-  if (!writeMerchantField(merchant, reviewItem.issue.affectedEntity, reviewItem.issue.affectedField, merchantValue.value)) {
+
+  let finalValue = merchantValue.value;
+  if (reviewItem.issue.issueType === "INVENTORY_LINK_MISSING" && typeof merchantValue.value === "number") {
+    // Merchant provided a stock quantity. Create the inventory record.
+    const newInvId = `inv-${reviewItem.issue.affectedEntity.id}-${Math.random().toString(36).substring(2, 9)}`;
+    merchant.inventory.push({
+      id: newInvId,
+      productId: reviewItem.issue.affectedEntity.id,
+      sku: "",
+      quantity: merchantValue.value
+    });
+    finalValue = newInvId;
+  }
+
+  if (!writeMerchantField(merchant, reviewItem.issue.affectedEntity, reviewItem.issue.affectedField, finalValue)) {
     return run;
   }
 
@@ -108,7 +122,7 @@ export function resolveReviewItem(
     reviewItem.issue,
     reviewItem.issue.affectedField,
     beforeValue,
-    merchantValue.value,
+    finalValue,
     "Value explicitly supplied by the merchant during review.",
     1,
     "MERCHANT_APPLIED",
@@ -179,6 +193,10 @@ function validateMerchantValue(
     return Number.isInteger(value) && value >= 0 ? { valid: true, value } : { valid: false };
   }
   if (issue.issueType === "INVENTORY_LINK_MISSING") {
+    const num = Number(rawValue);
+    if (Number.isInteger(num) && num >= 0) {
+      return { valid: true, value: num };
+    }
     const inventory = merchant.inventory.find((item) => item.id === text && item.productId === issue.affectedEntity.id);
     return inventory ? { valid: true, value: inventory.id } : { valid: false };
   }
