@@ -7,7 +7,7 @@ import type { IngestionResult } from "./readiness/ingestCsv.js";
 import type { ImprovementRun, ReadinessAudit, ReadinessIssue, ReviewItem, MerchantData } from "./readiness/types.js";
 import { AIBuyer, CommerceClient, LlmClient } from "./buyer/agent.js";
 
-type AppState = "ONBOARDING" | "ONBOARDING_CSV" | "IMPORT_SUMMARY" | "DASHBOARD" | "COMMERCE";
+type AppState = "ONBOARDING" | "ONBOARDING_CSV" | "IMPORT_SUMMARY" | "AUDIT_LOADING" | "DASHBOARD" | "COMMERCE";
 
 let currentState: AppState = "ONBOARDING";
 let sourceMerchant: MerchantData | null = null;
@@ -18,6 +18,7 @@ let progressState = "";
 let aiProvider = "Loading provider...";
 let ingestionResult: IngestionResult | null = null;
 let commerceSessionId: string | null = null;
+let auditLoadingStep = "Preparing your imported catalog";
 
 // Commerce state
 let commerceProducts: any[] = [];
@@ -62,7 +63,17 @@ app.addEventListener("click", async (event) => {
 
   const runAuditBtn = target.closest<HTMLButtonElement>("button[data-action='run-audit']");
   if (runAuditBtn) {
+    currentState = "AUDIT_LOADING";
+    auditLoadingStep = "Preparing your imported catalog";
+    render();
+    await delay(550);
+    auditLoadingStep = "Checking products, variants, inventory, and policies";
+    render();
+    await delay(650);
     initialAudit = auditMerchant(sourceMerchant!);
+    auditLoadingStep = "Calculating your readiness score";
+    render();
+    await delay(550);
     currentState = "DASHBOARD";
     render();
     return;
@@ -200,7 +211,19 @@ app.addEventListener("submit", async (event) => {
   }
 
   if (form.dataset.reviewId && improvementRun) {
-    let merchantValue: unknown = new FormData(form).get("merchantValue");
+    const formData = new FormData(form);
+    let merchantValue: unknown;
+    if (form.dataset.reviewType === "shipping-policy") {
+      merchantValue = {
+        regions: String(formData.get("shippingRegions") ?? "")
+          .split(",")
+          .map((region) => region.trim())
+          .filter(Boolean),
+        processingDays: Number(formData.get("shippingProcessingDays")),
+      };
+    } else {
+      merchantValue = formData.get("merchantValue");
+    }
     if (typeof merchantValue === "string" && merchantValue.trim().startsWith("{")) {
       try {
         merchantValue = JSON.parse(merchantValue);
@@ -517,6 +540,8 @@ function render(): void {
     content = renderOnboardingCsv();
   } else if (currentState === "IMPORT_SUMMARY") {
     content = renderImportSummary();
+  } else if (currentState === "AUDIT_LOADING") {
+    content = renderAuditLoading();
   } else if (currentState === "DASHBOARD") {
     content = renderDashboard();
   } else if (currentState === "COMMERCE") {
@@ -538,6 +563,24 @@ function render(): void {
     </header>
     ${content}
   `;
+}
+
+function renderAuditLoading(): string {
+  return `
+    <section class="audit-loading" role="status" aria-live="polite">
+      <div class="loading-spinner" aria-hidden="true"></div>
+      <p class="eyebrow">Readiness agent at work</p>
+      <h2>Building your readiness dashboard</h2>
+      <p>${escapeHtml(auditLoadingStep)}</p>
+      <div class="loading-steps" aria-label="Audit steps">
+        <span>Catalog imported</span><span>Audit running</span><span>Score calculated</span>
+      </div>
+    </section>
+  `;
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
 }
 
 function renderOnboardingSource(): string {
@@ -732,6 +775,13 @@ function renderReviewQueue(items: ReviewItem[]): string {
 }
 
 function renderReviewForm(item: ReviewItem): string {
+  if (item.issue.issueType === "SHIPPING_POLICY_INCOMPLETE") {
+    return `<form class="review-form" data-review-id="${escapeHtml(item.id)}" data-review-type="shipping-policy">
+      <label>Shipping regions<input required name="shippingRegions" type="text" placeholder="e.g. India, UAE" /></label>
+      <label>Processing days<input required name="shippingProcessingDays" type="number" min="0" step="1" placeholder="e.g. 2" /></label>
+      <button type="submit">Apply merchant decision</button>
+    </form>`;
+  }
   const numberInput = ["PRICE_INVALID", "INVENTORY_QUANTITY_INVALID", "CURRENCY_MISSING", "MAX_QUANTITY_PER_ITEM_MISSING", "INVENTORY_LINK_MISSING"].includes(item.issue.issueType);
   return `<form class="review-form" data-review-id="${escapeHtml(item.id)}"><label>Merchant value<input required name="merchantValue" type="${numberInput && item.issue.issueType !== "CURRENCY_MISSING" ? "number" : "text"}" ${numberInput && item.issue.issueType !== "CURRENCY_MISSING" ? "min=\"0\" step=\"any\"" : ""} placeholder="${escapeHtml(reviewPlaceholder(item))}" /></label><button type="submit">Apply merchant decision</button></form>`;
 }

@@ -84,6 +84,26 @@ test("CSV Ingestion - valid variant", () => {
   assert.equal(result.merchant.products[0].variants?.length, 2);
 });
 
+test("CSV Ingestion - preserves product attributes and avoids empty variants", () => {
+  const csv = [
+    "sku,name,description,category,price,stock,size,color,material,dimensions,brand,warranty",
+    "SHIRT-S,Shirt,Technical shirt,Apparel,100,5,S,blue,cotton,,,",
+    "SHIRT-M,,Technical shirt,Apparel,100,4,M,blue,cotton,,,",
+    "SPEAKER-1,Speaker,Portable speaker,Electronics,200,3,,,,,Audio Co,1 year",
+  ].join("\n");
+  const result = ingestCsv(csv, "m1", "M1", dummyPolicies);
+  const shirt = result.merchant.products.find((product) => product.name === "Shirt")!;
+  const speaker = result.merchant.products.find((product) => product.name === "Speaker")!;
+
+  assert.equal(result.errors.length, 0);
+  assert.equal(shirt.attributes?.material, "cotton");
+  assert.equal(shirt.attributes?.color, "blue");
+  assert.equal(shirt.attributes?.size, "S, M");
+  assert.equal(speaker.attributes?.brand, "Audio Co");
+  assert.equal(speaker.attributes?.warranty, "1 year");
+  assert.equal(speaker.variants, undefined);
+});
+
 test("CSV Ingestion - malformed variant", () => {
   const csv = "sku,name,size\nPROD-1-S,,S"; // Missing name and no previous product with that base SKU
   const result = ingestCsv(csv, "m1", "M1", dummyPolicies);

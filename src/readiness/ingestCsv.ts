@@ -61,6 +61,10 @@ export function ingestCsv(
     const stockStr = normalizedRow.stock;
     const size = normalizedRow.size;
     const color = normalizedRow.color;
+    const material = normalizedRow.material;
+    const dimensions = normalizedRow.dimensions;
+    const brand = normalizedRow.brand;
+    const warranty = normalizedRow.warranty;
 
     if (!sku) {
       result.errors.push(`Row ${rowNum}: Missing required field 'sku'`);
@@ -93,8 +97,12 @@ export function ingestCsv(
           category: category || null,
           price: isNaN(price) ? null : price,
           inventoryItemId: `inv-${baseSku.toLowerCase()}`,
-          variants: [],
-          attributes: {}
+          attributes: {
+            ...(material ? { material } : {}),
+            ...(dimensions ? { dimensions } : {}),
+            ...(brand ? { brand } : {}),
+            ...(warranty ? { warranty } : {}),
+          }
         };
         result.merchant.products.push(product);
       }
@@ -118,7 +126,10 @@ export function ingestCsv(
     if (size) options.size = size;
     if (color) options.color = color;
     
-    if (Object.keys(options).length > 0 || (product.variants && product.variants.length > 0)) {
+    if (size) addProductAttributeValue(product, "size", size);
+    if (color) addProductAttributeValue(product, "color", color);
+
+    if (Object.keys(options).length > 0 || product.variants?.length) {
       product.variants = product.variants || [];
       product.variants.push({ sku, options: Object.keys(options).length > 0 ? options : null });
     }
@@ -157,4 +168,14 @@ export function ingestCsv(
   }
 
   return result;
+}
+
+function addProductAttributeValue(product: Product, key: string, value: string): void {
+  product.attributes ??= {};
+  const current = product.attributes[key];
+  const values = typeof current === "string"
+    ? current.split(",").map((item) => item.trim()).filter(Boolean)
+    : [];
+  if (!values.includes(value)) values.push(value);
+  product.attributes[key] = values.join(", ");
 }

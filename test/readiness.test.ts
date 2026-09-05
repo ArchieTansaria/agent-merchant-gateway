@@ -174,6 +174,26 @@ test("merchant-entered policy value resolves only that review issue and re-audit
   assert.equal(resolved.afterAudit.overallScore, 80);
 });
 
+test("merchant-entered shipping details resolve shipping review without JSON input", async () => {
+  const merchant = validMerchant();
+  merchant.policies.shippingPolicy = null;
+  mockFetch(null, 200, false);
+  const run = await runReadinessImprovements(merchant);
+  const shippingReview = run.reviewItems.find((item) => item.issue.issueType === "SHIPPING_POLICY_INCOMPLETE");
+  assert.ok(shippingReview);
+
+  const resolved = resolveReviewItem(run, shippingReview.id, {
+    regions: ["India", "UAE"],
+    processingDays: 2,
+  });
+
+  assert.deepEqual(resolved.merchant.policies.shippingPolicy, {
+    regions: ["India", "UAE"],
+    processingDays: 2,
+  });
+  assert.equal(resolved.afterAudit.issues.some((issue) => issue.issueType === "SHIPPING_POLICY_INCOMPLETE"), false);
+});
+
 test("invalid, low-confidence, and malicious proposals cannot mutate merchant data", async () => {
   const merchant = ingestMerchant(demoMerchant);
   const audit = auditMerchant(merchant);

@@ -1,0 +1,6 @@
+sku,name,description,category,price,stock,size,color,material,dimensions,brand,warranty
+LIN-SHIRT-BLU-S,Coastal Linen Shirt,"A breathable linen shirt with a relaxed fit, corozo buttons, and a lightweight feel for warm days.","apparel ",2499,12,S,blue,linen,,,
+LIN-SHIRT-BLU-M,Coastal Linen Shirt,"A breathable linen shirt with a relaxed fit, corozo buttons, and a lightweight feel for warm days.","apparel ",2499,12,M,blue,linen,,,
+MUG-BLACK,Travel Mug,Steel mug.,Home,0,-2,,black,stainless steel,"8 cm × 8 cm × 15 cm",,
+MUG-WHITE,Travel Mug,Steel mug.,Home,0,-2,,white,stainless steel,"8 cm × 8 cm × 15 cm",,
+SPKR-POCKET,Pocket Speaker,"A compact Bluetooth speaker with a 10-hour battery, USB-C charging, and a splash-resistant enclosure.",Electronics,4999,6,,,,,Coastal Audio,1 year

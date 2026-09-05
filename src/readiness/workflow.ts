@@ -217,6 +217,19 @@ function validateMerchantValue(
     const value = Number(rawValue);
     return Number.isInteger(value) && value > 0 ? { valid: true, value } : { valid: false };
   }
+  if (issue.issueType === "SHIPPING_POLICY_INCOMPLETE") {
+    if (typeof rawValue !== "object" || rawValue === null || Array.isArray(rawValue)) {
+      return { valid: false };
+    }
+    const value = rawValue as { regions?: unknown; processingDays?: unknown };
+    const regions = Array.isArray(value.regions)
+      ? value.regions.filter((region): region is string => typeof region === "string" && region.trim().length > 0)
+      : [];
+    const processingDays = Number(value.processingDays);
+    return regions.length > 0 && Number.isInteger(processingDays) && processingDays >= 0
+      ? { valid: true, value: { regions, processingDays } }
+      : { valid: false };
+  }
   return { valid: false };
 }
 
