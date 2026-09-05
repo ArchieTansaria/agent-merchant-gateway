@@ -4,15 +4,19 @@ import { ingestMerchant } from "./readiness/ingest.js";
 import { resolveReviewItem, runReadinessImprovements } from "./readiness/workflow.js";
 import { CsvCatalogSource } from "./readiness/source.js";
 import type { IngestionResult } from "./readiness/ingestCsv.js";
-import type { ImprovementRun, ReadinessAudit, ReadinessIssue, ReviewItem, MerchantData } from "./readiness/types.js";
+import type { ImprovementRun, ReadinessAudit, ReadinessIssue, ReviewItem, MerchantData, ChangeLogRecord } from "./readiness/types.js";
 import { AIBuyer, CommerceClient, LlmClient } from "./buyer/agent.js";
 
-type AppState = "ONBOARDING" | "ONBOARDING_CSV" | "IMPORT_SUMMARY" | "AUDIT_LOADING" | "DASHBOARD" | "COMMERCE";
+type AppState = "ONBOARDING" | "ONBOARDING_CSV" | "IMPORT_SUMMARY" | "AUDIT_LOADING" | "PUBLISH_LOADING" | "DASHBOARD" | "COMMERCE";
 
 let currentState: AppState = "ONBOARDING";
 let sourceMerchant: MerchantData | null = null;
 let initialAudit: ReadinessAudit | null = null;
-let improvementRun: ImprovementRun | null = null;
+let auditHistory: ReadinessAudit[] = [];
+let currentAudit: ReadinessAudit | null = null;
+let changeLog: ChangeLogRecord[] = [];
+let currentReviewQueue: ReviewItem[] = [];
+let currentMerchantState: MerchantData | null = null;
 let isProcessing = false;
 let progressState = "";
 let aiProvider = "Loading provider...";
@@ -55,7 +59,12 @@ app.addEventListener("click", async (event) => {
   const demoBtn = target.closest<HTMLButtonElement>("button[data-action='use-demo']");
   if (demoBtn) {
     sourceMerchant = ingestMerchant(demoMerchant);
-    initialAudit = auditMerchant(sourceMerchant);
+    currentMerchantState = sourceMerchant;
+    initialAudit = auditMerchant(currentMerchantState, 1);
+    currentAudit = initialAudit;
+    auditHistory = [initialAudit];
+    changeLog = [];
+    currentReviewQueue = [];
     currentState = "DASHBOARD";
     render();
     return;
@@ -70,7 +79,12 @@ app.addEventListener("click", async (event) => {
     auditLoadingStep = "Checking products, variants, inventory, and policies";
     render();
     await delay(650);
-    initialAudit = auditMerchant(sourceMerchant!);
+    currentMerchantState = sourceMerchant!;
+    initialAudit = auditMerchant(currentMerchantState, 1);
+    currentAudit = initialAudit;
+    auditHistory = [initialAudit];
+    changeLog = [];
+    currentReviewQueue = [];
     auditLoadingStep = "Calculating your readiness score";
     render();
     await delay(550);
@@ -80,16 +94,22 @@ app.addEventListener("click", async (event) => {
   }
 
   const runImprovBtn = target.closest<HTMLButtonElement>("button[data-action='run-improvements']");
-  if (runImprovBtn && !isProcessing && !improvementRun && sourceMerchant) {
+  if (runImprovBtn && !isProcessing && currentMerchantState) {
     isProcessing = true;
     progressState = "STARTING";
     render();
     
     try {
-      improvementRun = await runReadinessImprovements(sourceMerchant, (state) => {
+      const run = await runReadinessImprovements(currentMerchantState, (state) => {
         progressState = state;
         render();
       });
+      // Merge iterative state
+      currentMerchantState = run.merchant;
+      changeLog = [...changeLog, ...run.changes];
+      currentReviewQueue = run.reviewItems;
+      currentAudit = auditMerchant(currentMerchantState, auditHistory.length + 1);
+      auditHistory.push(currentAudit);
     } catch (err) {
       console.error(err);
       alert("An error occurred running improvements");
@@ -101,12 +121,33 @@ app.addEventListener("click", async (event) => {
     return;
   }
 
-  const publishBtn = target.closest<HTMLButtonElement>("button[data-action='publish']");
-  if (publishBtn && sourceMerchant && improvementRun) {
-    publishBtn.disabled = true;
-    publishBtn.textContent = "Publishing...";
+  const reAuditBtn = target.closest<HTMLButtonElement>("button[data-action='re-audit']");
+  if (reAuditBtn && !isProcessing && currentMerchantState) {
+    isProcessing = true;
+    progressState = "Re-auditing...";
+    render();
     try {
-      const payload = improvementRun.merchant;
+      currentAudit = auditMerchant(currentMerchantState, auditHistory.length + 1);
+      auditHistory.push(currentAudit);
+      // Clear active review queue as fresh audit is now ground truth
+      currentReviewQueue = [];
+    } finally {
+      isProcessing = false;
+      progressState = "COMPLETE";
+      render();
+    }
+    return;
+  }
+
+  const publishBtn = target.closest<HTMLButtonElement>("button[data-action='publish']");
+  if (publishBtn && currentMerchantState && currentAudit && currentAudit.overallScore >= 90) {
+    currentState = "PUBLISH_LOADING";
+    render();
+    try {
+      // Small artificial delay for UX
+      await delay(1000);
+      
+      const payload = currentMerchantState;
       const res = await fetch("/api/merchant/publish", {
         method: "POST",
         headers: {
@@ -122,8 +163,8 @@ app.addEventListener("click", async (event) => {
       await loadCommerceState();
     } catch (e: any) {
       alert("Failed to publish: " + e.message);
-      publishBtn.disabled = false;
-      publishBtn.textContent = "Publish to AI Commerce";
+      currentState = "DASHBOARD";
+      render();
     }
     return;
   }
@@ -210,7 +251,7 @@ app.addEventListener("submit", async (event) => {
     return;
   }
 
-  if (form.dataset.reviewId && improvementRun) {
+  if (form.dataset.reviewId && currentMerchantState && currentAudit) {
     const formData = new FormData(form);
     let merchantValue: unknown;
     if (form.dataset.reviewType === "shipping-policy") {
@@ -231,7 +272,34 @@ app.addEventListener("submit", async (event) => {
         // ignore
       }
     }
-    improvementRun = resolveReviewItem(improvementRun, form.dataset.reviewId, merchantValue);
+    
+    // Create a dummy run to reuse resolveReviewItem logic
+    const dummyRun = {
+      sourceMerchant: currentMerchantState,
+      merchant: currentMerchantState,
+      beforeAudit: currentAudit,
+      afterAudit: currentAudit,
+      proposals: [],
+      validations: [],
+      changes: [], // start empty to capture just this change
+      reviewItems: currentReviewQueue,
+      resolvedIssueIds: []
+    };
+    
+    const newRun = resolveReviewItem(dummyRun, form.dataset.reviewId, merchantValue);
+    
+    // Sync state back
+    currentMerchantState = newRun.merchant;
+    currentReviewQueue = newRun.reviewItems;
+    
+    if (newRun.changes.length > 0) {
+      changeLog = [...changeLog, ...newRun.changes];
+    }
+    
+    // Explicitly re-audit so score and issues are up to date
+    currentAudit = auditMerchant(currentMerchantState, auditHistory.length + 1);
+    auditHistory.push(currentAudit);
+    
     render();
   }
 });
@@ -542,6 +610,8 @@ function render(): void {
     content = renderImportSummary();
   } else if (currentState === "AUDIT_LOADING") {
     content = renderAuditLoading();
+  } else if (currentState === "PUBLISH_LOADING") {
+    content = renderPublishLoading();
   } else if (currentState === "DASHBOARD") {
     content = renderDashboard();
   } else if (currentState === "COMMERCE") {
@@ -574,6 +644,20 @@ function renderAuditLoading(): string {
       <p>${escapeHtml(auditLoadingStep)}</p>
       <div class="loading-steps" aria-label="Audit steps">
         <span>Catalog imported</span><span>Audit running</span><span>Score calculated</span>
+      </div>
+    </section>
+  `;
+}
+
+function renderPublishLoading(): string {
+  return `
+    <section class="audit-loading" role="status" aria-live="polite">
+      <div class="loading-spinner" aria-hidden="true"></div>
+      <p class="eyebrow">Deploying to AI Commerce</p>
+      <h2>Publishing your AI-ready catalog</h2>
+      <p>Provisioning secure external APIs for AI buyers...</p>
+      <div class="loading-steps" aria-label="Publish steps">
+        <span>Policies attached</span><span>Inventory linked</span><span>Endpoints live</span>
       </div>
     </section>
   `;
@@ -710,40 +794,46 @@ function renderImportSummary(): string {
 }
 
 function renderDashboard(): string {
-  if (!initialAudit) return "";
-  const currentAudit = improvementRun?.afterAudit ?? initialAudit;
+  if (!initialAudit || !currentAudit) return "";
   return `
     ${renderFlow(currentAudit)}
-    ${renderScores(currentAudit, improvementRun?.beforeAudit)}
-    ${improvementRun ? renderWorkflow(improvementRun) : renderInitialAudit(currentAudit)}
+    ${renderScores(currentAudit)}
+    ${auditHistory.length > 1 ? renderWorkflow() : renderInitialAudit(currentAudit)}
   `;
 }
 
 function renderFlow(audit: ReadinessAudit): string {
-  const state = isProcessing ? "processing" : improvementRun ? "complete" : "idle";
-  const btnText = isProcessing ? progressState : improvementRun ? "AI Improvements Applied" : "Run AI Improvements";
+  const state = isProcessing ? "processing" : auditHistory.length > 1 ? "complete" : "idle";
   
-  let actionBtn = `<button class="primary-button" data-action="run-improvements" ${state === "idle" ? "" : "disabled"}>${escapeHtml(btnText)}</button>`;
+  let aiBtnText = "Run AI readiness pass";
+  if (isProcessing) aiBtnText = progressState;
   
-  if (state === "complete" && audit.overallScore >= 90) {
-    actionBtn = `<button class="primary-button" style="background:#039855; border-color:#039855;" data-action="publish">Publish to AI Commerce</button>`;
-  } else if (state === "complete") {
-     actionBtn = `<button class="primary-button" disabled>Resolve issues to publish</button>`;
+  let actionBtn = `<button class="primary-button" data-action="run-improvements" ${isProcessing ? "disabled" : ""}>${escapeHtml(aiBtnText)}</button>`;
+  
+  let reauditBtn = `<button class="secondary-button" data-action="re-audit" ${isProcessing ? "disabled" : ""}>Re-audit</button>`;
+  
+  let publishBtn = `<button class="primary-button" disabled>Publishing requires 90+</button>`;
+  if (audit.overallScore >= 90) {
+    publishBtn = `<button class="primary-button" style="background:#039855; border-color:#039855;" data-action="publish">Publish to AI Commerce</button>`;
   }
 
   return `<section class="flow-strip state-${state}" aria-label="Readiness workflow">
-    <span>1. Audit</span><span>2. AI proposals</span><span>3. Safety validation</span><span>4. Apply safe changes</span><span>5. Merchant review</span><span>6. Re-audit</span>
-    ${actionBtn}
-    <span class="flow-score">Current: ${audit.overallScore}/100</span>
+    <div style="display: flex; gap: 8px;">
+      ${actionBtn}
+      ${auditHistory.length > 1 ? reauditBtn : ""}
+      ${publishBtn}
+    </div>
+    <span class="flow-score">Current Score: ${audit.overallScore}/100</span>
   </section>`;
 }
 
-function renderScores(result: ReadinessAudit, before?: ReadinessAudit): string {
+function renderScores(result: ReadinessAudit): string {
+  const before = auditHistory.length > 1 ? auditHistory[0] : null;
   return `<section class="summary-grid" aria-label="Readiness summary">
-    ${before ? `<article class="metric-card"><p class="card-label">Before</p><p class="metric">${before.overallScore}<small>/100</small></p><p class="metric-note">Original audit</p></article>` : ""}
-    <article class="score-card"><p class="card-label">${before ? "After safe changes" : "Overall readiness"}</p><p class="score"><span>${result.overallScore}</span> / 100</p><p class="score-note">${readinessLabel(result.overallScore)}</p></article>
-    <article class="metric-card"><p class="card-label">Detected issues</p><p class="metric">${result.issueCount}</p><p class="metric-note">${severitySummary(result.issues)}</p></article>
-    ${before ? `<article class="metric-card"><p class="card-label">Score movement</p><p class="metric positive">${result.overallScore >= before.overallScore ? '+' : ''}${result.overallScore - before.overallScore}</p><p class="metric-note">From actual re-audit results</p></article>` : ""}
+    ${before ? `<article class="metric-card"><p class="card-label">Initial audit</p><p class="metric">${before.overallScore}<small>/100</small></p><p class="metric-note">Before any changes</p></article>` : ""}
+    <article class="score-card"><p class="card-label">Current readiness</p><p class="score"><span>${result.overallScore}</span> / 100</p><p class="score-note">${readinessLabel(result.overallScore)}</p></article>
+    <article class="metric-card"><p class="card-label">Current issues</p><p class="metric">${result.issueCount}</p><p class="metric-note">${severitySummary(result.issues)}</p></article>
+    ${before ? `<article class="metric-card"><p class="card-label">Score movement</p><p class="metric positive">${result.overallScore >= before.overallScore ? '+' : ''}${result.overallScore - before.overallScore}</p><p class="metric-note">Since initial audit</p></article>` : ""}
   </section>
   <section class="panel" aria-labelledby="category-scores-heading"><div class="panel-heading"><div><p class="eyebrow">Scoring breakdown</p><h2 id="category-scores-heading">Category scores</h2></div><p class="panel-note">Every deduction is tied to a visible audit issue. Scores never fall below zero.</p></div><div class="category-grid">${result.categoryScores.map((category) => `<article class="category-card"><div class="category-topline"><h3>${escapeHtml(category.label)}</h3><strong>${category.score}/${category.maximum}</strong></div><div class="meter"><span style="width:${(category.score / category.maximum) * 100}%"></span></div><p>${category.deductions ? `${category.deductions} point deductions` : "No deductions"}</p></article>`).join("")}</div></section>`;
 }
@@ -752,21 +842,53 @@ function renderInitialAudit(audit: ReadinessAudit): string {
   return `<section class="panel"><div class="panel-heading"><div><p class="eyebrow">Initial audit</p><h2>Detected issues</h2></div><p class="panel-note">Run improvements to generate proposals. The source merchant data is never changed directly.</p></div>${renderIssues(audit.issues)}</section>`;
 }
 
-function renderWorkflow(run: ImprovementRun): string {
-  const reviewRequired = run.reviewItems.filter((item) => item.status === "REVIEW_REQUIRED").length;
+function renderWorkflow(): string {
+  if (!initialAudit || !currentAudit) return "";
+  
+  const initialIssueIds = new Set(initialAudit.issues.map(i => i.id));
+  const currentIssueIds = new Set(currentAudit.issues.map(i => i.id));
+  
+  let originallyResolved = 0;
+  let originallyRemain = 0;
+  let newIssues = 0;
+  
+  for (const id of initialIssueIds) {
+    if (currentIssueIds.has(id)) originallyRemain++;
+    else originallyResolved++;
+  }
+  for (const id of currentIssueIds) {
+    if (!initialIssueIds.has(id)) newIssues++;
+  }
+  
+  const reviewRequired = currentReviewQueue.filter(i => i.status === "REVIEW_REQUIRED").length;
+  
   return `<section class="workflow-metrics" aria-label="Improvement outcome">
-    <article class="outcome outcome-auto"><strong> ${run.changes.filter((change) => change.status === "AUTO_APPLIED").length} automatically fixed</strong><span>High-confidence proposals passed deterministic validation.</span></article>
-    <article class="outcome outcome-review"><strong>${reviewRequired} merchant decisions required</strong><span>Sensitive or ambiguous values were not invented.</span></article>
-    <article class="outcome outcome-blocked"><strong>${run.afterAudit.issueCount - reviewRequired} unresolved / blocking</strong><span>Issues remain until a valid merchant value is supplied.</span></article>
+    <article class="outcome outcome-auto">
+      <strong>Initial audit: ${initialAudit.issues.length} issues</strong>
+      <span>Resolved: ${originallyResolved}</span>
+    </article>
+    <article class="outcome outcome-review">
+      <strong>Re-audit: ${currentAudit.issues.length} remaining</strong>
+      <span>${originallyRemain} original, ${newIssues} new</span>
+    </article>
+    <article class="outcome outcome-blocked">
+      <strong>${reviewRequired > 0 ? `${reviewRequired} need review` : "No pending AI reviews"}</strong>
+      <span>${currentAudit.issues.length > 0 ? "Issues remain." : "Ready to publish!"}</span>
+    </article>
   </section>
-  <section class="panel"><div class="panel-heading"><div><p class="eyebrow">AI corrections</p><h2>Applied change log</h2></div><p class="panel-note">Every automatic write has a before value, after value, reason, confidence, timestamp, and rollback-ready record.</p></div>${renderChanges(run)}</section>
-  <section class="panel"><div class="panel-heading"><div><p class="eyebrow">Merchant review queue</p><h2>Decisions the agent cannot make</h2></div><p class="panel-note">Policy and commercial decisions require explicit merchant input. The agent never chooses their value.</p></div>${renderReviewQueue(run.reviewItems)}</section>
-  <section class="panel"><div class="panel-heading"><div><p class="eyebrow">Re-audit</p><h2>Remaining issues</h2></div><p class="panel-note">${run.resolvedIssueIds.length} initial issue${run.resolvedIssueIds.length === 1 ? "" : "s"} resolved after corrections.</p></div>${renderIssues(run.afterAudit.issues)}</section>`;
+  <section class="panel"><div class="panel-heading"><div><p class="eyebrow">Audit iterations</p><h2>Audit history</h2></div><p class="panel-note">Every audit and iteration of the workflow.</p></div>
+    <div style="padding:16px;">
+      ${auditHistory.map(a => `<div style="margin-bottom:8px;"><strong>Audit #${a.iteration}</strong> — Score: ${a.overallScore}/100 — ${a.issues.length} issues</div>`).join("")}
+    </div>
+  </section>
+  <section class="panel"><div class="panel-heading"><div><p class="eyebrow">Merchant review queue</p><h2>Decisions the agent cannot make</h2></div><p class="panel-note">Policy and commercial decisions require explicit merchant input. The agent never chooses their value.</p></div>${renderReviewQueue(currentReviewQueue)}</section>
+  <section class="panel"><div class="panel-heading"><div><p class="eyebrow">AI corrections</p><h2>Applied change log</h2></div><p class="panel-note">Every automatic write has a before value, after value, reason, confidence, timestamp, and rollback-ready record.</p></div>${renderChanges()}</section>
+  <section class="panel"><div class="panel-heading"><div><p class="eyebrow">Re-audit</p><h2>Remaining issues</h2></div><p class="panel-note">Issues that still need to be resolved.</p></div>${renderIssues(currentAudit.issues)}</section>`;
 }
 
-function renderChanges(run: ImprovementRun): string {
-  if (!run.changes.length) return '<p class="empty-state">No safe corrections were applied.</p>';
-  return `<div class="change-list">${run.changes.map((change) => `<article class="change-row"><span class="status-badge status-${change.status.toLowerCase()}">${change.status === "AUTO_APPLIED" ? "Automatically fixed" : "Merchant applied"}</span><div><strong>${escapeHtml(change.entity.name)} · <code>${escapeHtml(change.field)}</code></strong><p><span class="value-before">${escapeHtml(formatValue(change.beforeValue))}</span> → <span class="value-after">${escapeHtml(formatValue(change.afterValue))}</span></p><small>${escapeHtml(change.reason)} · ${(change.confidence * 100).toFixed(0)}% confidence · ${escapeHtml(change.timestamp)}</small></div></article>`).join("")}</div>`;
+function renderChanges(): string {
+  if (!changeLog.length) return '<p class="empty-state">No safe corrections were applied.</p>';
+  return `<div class="change-list">${changeLog.map((change) => `<article class="change-row"><span class="status-badge status-${change.status.toLowerCase()}">${change.status === "AUTO_APPLIED" ? "Automatically fixed" : "Merchant applied"}</span><div><strong>${escapeHtml(change.entity.name)} · <code>${escapeHtml(change.field)}</code></strong><p><span class="value-before">${escapeHtml(formatValue(change.beforeValue))}</span> → <span class="value-after">${escapeHtml(formatValue(change.afterValue))}</span></p><small>${escapeHtml(change.reason)} · ${(change.confidence * 100).toFixed(0)}% confidence · ${escapeHtml(change.timestamp)}</small></div></article>`).join("")}</div>`;
 }
 
 function renderReviewQueue(items: ReviewItem[]): string {

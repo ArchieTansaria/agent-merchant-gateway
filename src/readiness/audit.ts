@@ -57,7 +57,7 @@ const productCategoryByNormalizedName = new Map(
  * Audits merchant data without changing it. Every score deduction corresponds
  * to a returned issue, so the score can be independently explained in the UI.
  */
-export function auditMerchant(merchant: MerchantData): ReadinessAudit {
+export function auditMerchant(merchant: MerchantData, iteration: number = 1): ReadinessAudit {
   const issues: ReadinessIssue[] = [];
   const inventoryById = new Map(
     merchant.inventory.map((inventoryItem) => [inventoryItem.id, inventoryItem]),
@@ -248,6 +248,7 @@ export function auditMerchant(merchant: MerchantData): ReadinessAudit {
   return {
     merchantId: merchant.id,
     merchantName: merchant.name,
+    iteration,
     overallScore,
     categoryScores,
     issueCount: issues.length,

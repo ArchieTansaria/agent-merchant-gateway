@@ -93,6 +93,7 @@ export interface CategoryScore {
 export interface ReadinessAudit {
   merchantId: string;
   merchantName: string;
+  iteration: number;
   overallScore: number;
   categoryScores: CategoryScore[];
   issueCount: number;
