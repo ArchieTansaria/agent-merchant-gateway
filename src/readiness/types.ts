@@ -96,3 +96,61 @@ export interface ReadinessAudit {
   issues: ReadinessIssue[];
   scoringExplanation: string;
 }
+
+export type CorrectionAction = "AUTO_APPLY" | "REVIEW_REQUIRED" | "REJECT";
+
+export interface CorrectionProposal {
+  issueId: string;
+  entityId: string;
+  field: string;
+  currentValue: unknown;
+  proposedValue: unknown;
+  reason: string;
+  confidence: number;
+  action: CorrectionAction;
+  correctionType: string;
+}
+
+export interface ValidatedCorrection {
+  proposal: CorrectionProposal | null;
+  action: CorrectionAction;
+  reason: string;
+}
+
+export type ChangeStatus = "AUTO_APPLIED" | "MERCHANT_APPLIED" | "ROLLED_BACK";
+
+export interface ChangeLogRecord {
+  id: string;
+  issueId: string;
+  entity: AffectedEntity;
+  field: string;
+  beforeValue: unknown;
+  afterValue: unknown;
+  reason: string;
+  confidence: number;
+  timestamp: string;
+  status: ChangeStatus;
+}
+
+export interface ReviewItem {
+  id: string;
+  issue: ReadinessIssue;
+  proposal: CorrectionProposal;
+  currentValue: unknown;
+  proposedValue: unknown;
+  reason: string;
+  confidence: number;
+  status: "REVIEW_REQUIRED" | "RESOLVED";
+}
+
+export interface ImprovementRun {
+  sourceMerchant: MerchantData;
+  merchant: MerchantData;
+  beforeAudit: ReadinessAudit;
+  afterAudit: ReadinessAudit;
+  proposals: CorrectionProposal[];
+  validations: ValidatedCorrection[];
+  changes: ChangeLogRecord[];
+  reviewItems: ReviewItem[];
+  resolvedIssueIds: string[];
+}

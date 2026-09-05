@@ -35,6 +35,7 @@ h3 { margin: 0; font-size: 0.95rem; }
 
 .summary-grid, .category-grid { display: grid; gap: 16px; }
 .summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); margin-bottom: 16px; }
+.summary-grid:has(.metric-card:nth-child(4)) { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 
 .score-card, .metric-card, .panel, .category-card {
   background: #fff;
@@ -49,6 +50,8 @@ h3 { margin: 0; font-size: 0.95rem; }
 .score span, .metric { color: inherit; font-size: 3rem; font-weight: 760; letter-spacing: -0.06em; line-height: 0.9; }
 .score-note { margin-bottom: 0; color: #dcddff; font-size: 0.875rem; }
 .metric { margin-bottom: 12px; color: #101828; }
+.metric small { font-size: 1rem; letter-spacing: 0; }
+.positive { color: #067647; }
 .metric-note { margin-bottom: 0; font-size: 0.875rem; }
 
 .panel { margin-top: 16px; padding: 24px; }
@@ -79,9 +82,69 @@ code { color: #5d5fef; font-family: "SFMono-Regular", Consolas, monospace; font-
 .severity-warning { color: #175cd3; background: #eff8ff; }
 .empty-state { margin-bottom: 0; color: #667085; }
 
+.flow-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 16px;
+  padding: 14px 16px;
+  border: 1px solid #dfe3ff;
+  border-radius: 12px;
+  background: #f8f8ff;
+  color: #4b4da7;
+  font-size: 0.78rem;
+  font-weight: 650;
+}
+.flow-strip > span:not(.flow-score) { white-space: nowrap; }
+.flow-strip > span:not(.flow-score)::after { content: "→"; margin-left: 8px; color: #a5a6e8; }
+.flow-strip > span:nth-of-type(6)::after { content: ""; margin: 0; }
+.flow-score { margin-left: auto; color: #344054; }
+.primary-button, .review-form button {
+  border: 0;
+  border-radius: 8px;
+  background: #5d5fef;
+  color: #fff;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 700;
+  padding: 9px 13px;
+}
+.primary-button:disabled { cursor: default; background: #898add; }
+.state-processing { animation: pulse 1s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: 0.65; } }
+
+.workflow-metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; margin-top: 16px; }
+.outcome { display: grid; gap: 8px; padding: 16px; border: 1px solid; border-radius: 12px; font-size: 0.875rem; }
+.outcome span { color: #667085; font-size: 0.8rem; line-height: 1.4; }
+.outcome-auto { border-color: #abefc6; background: #ecfdf3; color: #027a48; }
+.outcome-review { border-color: #fedf89; background: #fffaeb; color: #b54708; }
+.outcome-blocked { border-color: #fecdca; background: #fef3f2; color: #b42318; }
+.change-list, .review-list { display: grid; gap: 12px; }
+.change-row { display: grid; grid-template-columns: 150px 1fr; gap: 16px; padding: 14px 0; border-top: 1px solid #eaecf0; }
+.change-row:first-child { border-top: 0; padding-top: 0; }
+.change-row p { margin: 8px 0; }
+.change-row small, .review-card small { color: #667085; line-height: 1.4; }
+.value-before { color: #b42318; text-decoration: line-through; }
+.value-after { color: #027a48; font-weight: 650; }
+.status-badge { display: inline-flex; width: fit-content; height: fit-content; padding: 4px 8px; border-radius: 999px; font-size: 0.72rem; font-weight: 750; }
+.status-auto_applied { background: #d1fadf; color: #027a48; }
+.status-merchant_applied { background: #eff8ff; color: #175cd3; }
+.status-review { background: #fef0c7; color: #b54708; }
+.review-card { display: grid; grid-template-columns: minmax(0, 1fr) 270px; gap: 20px; padding: 18px; border: 1px solid #fedf89; border-radius: 10px; background: #fffdf6; }
+.review-card h3 { margin: 10px 0 7px; }
+.review-card p { margin-bottom: 7px; color: #475467; font-size: 0.875rem; line-height: 1.4; }
+.review-resolved { border-color: #abefc6; background: #f6fef9; }
+.review-form { display: grid; align-content: start; gap: 10px; }
+.review-form label { display: grid; gap: 6px; color: #475467; font-size: 0.78rem; font-weight: 650; }
+.review-form input { width: 100%; padding: 9px; border: 1px solid #d0d5dd; border-radius: 7px; color: #1d2939; font: inherit; }
+
 @media (max-width: 760px) {
   main { width: min(100% - 24px, 1180px); padding-top: 32px; }
   .summary-grid, .category-grid { grid-template-columns: 1fr; }
+  .summary-grid:has(.metric-card:nth-child(4)), .workflow-metrics { grid-template-columns: 1fr; }
   .panel-heading { display: block; }
   .panel-note { margin-top: 12px; }
+  .flow-score { width: 100%; margin-left: 0; }
+  .change-row, .review-card { grid-template-columns: 1fr; }
 }

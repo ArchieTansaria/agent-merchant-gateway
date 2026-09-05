@@ -17,6 +17,7 @@ export const demoMerchant: MerchantData = {
       attributes: {
         material: "linen",
         color: "blue",
+        size: "S, M",
       },
       price: 2499,
       inventoryItemId: "inv-linen-shirt",
@@ -65,6 +66,12 @@ export const demoMerchant: MerchantData = {
       productId: "prod-travel-mug",
       sku: "MUG",
       quantity: -2,
+    },
+    {
+      id: "inv-pocket-speaker",
+      productId: "prod-pocket-speaker",
+      sku: "SPKR-POCKET",
+      quantity: 6,
     },
   ],
   policies: {
